@@ -1,7 +1,7 @@
 import requests
 from flask import Flask, request, jsonify, Response
 from datetime import datetime
-import pyJianYingDraft as draft
+import auto_jianyingdraft.pyJianYingDraft as draft
 from pyJianYingDraft.metadata.animation_meta import Intro_type, Outro_type, Group_animation_type
 from pyJianYingDraft.metadata.capcut_animation_meta import CapCut_Intro_type, CapCut_Outro_type, CapCut_Group_animation_type
 from pyJianYingDraft.metadata.transition_meta import Transition_type
@@ -19,8 +19,8 @@ import random
 import uuid
 import json
 import codecs
-from add_audio_track import add_audio_track
-from add_video_track import add_video_track
+from auto_jianyingdraft.add_audio_track import add_audio_track
+from auto_jianyingdraft.add_video_track import add_video_track
 from add_text_impl import add_text_impl
 from add_subtitle_impl import add_subtitle_impl
 from add_image_impl import add_image_impl
@@ -28,7 +28,7 @@ from add_video_keyframe_impl import add_video_keyframe_impl
 from save_draft_impl import save_draft_impl, query_task_status, query_script_impl
 from add_effect_impl import add_effect_impl
 from add_sticker_impl import add_sticker_impl
-from create_draft import create_draft
+from auto_jianyingdraft.create_draft import create_draft
 from util import generate_draft_url as utilgenerate_draft_url, hex_to_rgb
 from pyJianYingDraft.text_segment import TextStyleRange, Text_style, Text_border
 

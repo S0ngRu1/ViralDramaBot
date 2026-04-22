@@ -18,10 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 导入CapCut API功能
 try:
-    from create_draft import get_or_create_draft
+    from auto_jianyingdraft.create_draft import get_or_create_draft
     from add_text_impl import add_text_impl
-    from add_video_track import add_video_track
-    from add_audio_track import add_audio_track
+    from auto_jianyingdraft.add_video_track import add_video_track
+    from auto_jianyingdraft.add_audio_track import add_audio_track
     from add_image_impl import add_image_impl
     from add_subtitle_impl import add_subtitle_impl
     from add_effect_impl import add_effect_impl

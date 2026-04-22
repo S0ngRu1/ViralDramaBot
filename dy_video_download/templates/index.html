@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Douyin Video Search</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .video {
+            margin-bottom: 20px;
+        }
+        .video-title {
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Douyin Video Search</h1>
+    <form id="search-form">
+        <label for="keyword">Enter Keyword:</label>
+        <input type="text" id="keyword" name="keyword" required>
+        <button type="submit">Search</button>
+    </form>
+
+    <div id="results"></div>
+
+    <script>
+        document.getElementById('search-form').addEventListener('submit', async function(event) {
+            event.preventDefault();
+            const keyword = document.getElementById('keyword').value;
+            const response = await fetch(`/search?keyword=${encodeURIComponent(keyword)}`);
+            const results = await response.json();
+
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+
+            if (results.error) {
+                resultsDiv.innerHTML = `<p>Error: ${results.error}</p>`;
+                return;
+            }
+
+            results.forEach(video => {
+                const videoDiv = document.createElement('div');
+                videoDiv.className = 'video';
+                videoDiv.innerHTML = `
+                    <p class="video-title">${video.title}</p>
+                    <p>Likes: ${video.likes}</p>
+                    <a href="${video.url}" target="_blank">Download</a>
+                `;
+                resultsDiv.appendChild(videoDiv);
+            });
+        });
+    </script>
+</body>
+</html>

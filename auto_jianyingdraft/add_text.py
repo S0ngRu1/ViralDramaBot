@@ -10,7 +10,7 @@ import json
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-from pyJianYingDraft import Draft, TextSegment, SubtitleSegment
+from auto_jianyingdraft.pyJianYingDraft import Draft, TextSegment, SubtitleSegment
 from pyJianYingDraft.utils import generate_uuid, format_duration
 import logging
 

@@ -13,7 +13,7 @@ from typing import Optional, Dict, Any, List, Tuple
 import requests
 from PIL import Image
 import numpy as np
-from pyJianYingDraft import Draft, Sticker, ImageMaterial
+from auto_jianyingdraft.pyJianYingDraft import Draft, Sticker, ImageMaterial
 from pyJianYingDraft.utils import generate_uuid, format_duration
 import logging
 
