@@ -90,7 +90,8 @@ class DouyinProcessor:
             timeout: 请求超时时间（秒）
             max_retries: 最大重试次数
         """
-        self.timeout = timeout
+        self.timeout = timeout  # 用于普通请求（链接解析、页面获取）
+        self.download_timeout = (30, 60)  # (连接超时, 读取超时)，用于下载大文件
         self.max_retries = max_retries
         self.session = self._create_session()
     
@@ -386,7 +387,7 @@ class DouyinProcessor:
             response = self.session.get(
                 video_info.url,
                 headers=HEADERS,
-                timeout=self.timeout,
+                timeout=self.download_timeout,
                 stream=True
             )
             response.raise_for_status()
