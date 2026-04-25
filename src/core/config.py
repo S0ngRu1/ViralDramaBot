@@ -10,7 +10,7 @@
 import os
 import sys
 from pathlib import Path
-from logger import logger
+from .logger import logger
 
 
 class Config:

@@ -9,16 +9,16 @@
 """
 
 import re
-import os
 import sys
-from typing import Optional, Callable, Dict, Tuple
+import json
+from typing import Optional, Callable
 from dataclasses import dataclass
 from pathlib import Path
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from logger import logger
-from config import config
+
+from ...core import logger, config
 
 
 # 请求头 - 模拟 iPhone 移动端访问
@@ -259,6 +259,9 @@ class DouyinProcessor:
             # 获取原始 URL（通常是有水印版本）
             original_url = video_url_match.group(1)
             
+            # 反转义 URL（处理 JSON 编码的特殊字符，如 \u002F）
+            original_url = self._unescape_url(original_url)
+            
             # 转换为无水印版本：将 playwm 替换为 play
             clean_url = original_url.replace("playwm", "play")
             logger.debug(f"提取到视频 URL: {clean_url}")
@@ -465,6 +468,29 @@ class DouyinProcessor:
             size_index += 1
         
         return f"{size:.1f} {sizes[size_index]}"
+    
+    @staticmethod
+    def _unescape_url(url: str) -> str:
+        """
+        反转义 URL 中的 JSON 编码字符
+        
+        处理格式如 \\u002F 的转义序列，将其转换为实际的字符
+        
+        Args:
+            url: 可能包含转义字符的 URL
+        
+        Returns:
+            str: 反转义后的 URL
+        """
+        try:
+            # 使用 json.loads 来处理 JSON 转义序列
+            # 将字符串包装在引号中以进行 JSON 解析
+            unescaped = json.loads(f'"{url}"')
+            return unescaped
+        except Exception as e:
+            # 如果 JSON 解析失败，返回原始 URL
+            logger.debug(f"URL 反转义失败: {str(e)}, 使用原始 URL")
+            return url
     
     @staticmethod
     def _create_progress_bar(percentage: float, length: int = 20) -> str:
