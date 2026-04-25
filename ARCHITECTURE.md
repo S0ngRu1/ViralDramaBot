@@ -1,362 +1,286 @@
-# ViralDramaBot 项目架构文档
+# ViralDramaBot 架构说明
 
-## 📋 项目概述
+## 概览
 
-**ViralDramaBot** 是一个"一站式短剧自动化流水线"解决方案，涵盖：
-- 🎬 **资源采集**：从抖音、视频号等平台下载短剧
-- ✂️ **智能剪辑**：基于剪映API的自动化编辑
-- 📊 **内容生成**：字幕、封面、标签等自动生成
-- 📢 **多平台发布**：一键发布到抖音、快手、视频号等
+当前项目的主线是一套抖音下载 Web 工具，整体由三层组成：
+
+1. 前端界面层
+2. Web API 与索引管理层
+3. 抖音解析与下载层
+
+目前编辑层、发布层、工作流层仍然是预留结构。
 
 ---
 
-## 🏗️ 项目架构
+## 目录结构
 
-```
+```text
 ViralDramaBot/
-├── src/                           # 源代码目录
-│   ├── core/                      # 核心通用模块
-│   │   ├── __init__.py
-│   │   ├── config.py              # 全局配置管理
-│   │   └── logger.py              # 统一日志系统
-│   │
-│   ├── ingestion/                 # 资源采集层
-│   │   ├── __init__.py
-│   │   └── douyin/                # 抖音采集模块（已实现）
-│   │       ├── __init__.py
-│   │       ├── processor.py       # 核心处理器
-│   │       └── downloader.py      # 下载工具
-│   │
-│   ├── editing/                   # 内容编辑层
-│   │   ├── __init__.py
-│   │   └── capcut/                # 剪映自动化编辑（待实现）
-│   │       └── __init__.py
-│   │
-│   ├── publishing/                # 内容发布层
-│   │   ├── __init__.py            # 多平台发布（待实现）
-│   │   ├── douyin/
-│   │   ├── wechat_channels/
-│   │   └── bilibili/
-│   │
-│   ├── workflow/                  # 工作流编排层
-│   │   └── __init__.py            # DAG/任务编排（待实现）
-│   │
-│   ├── utils/                     # 通用工具库
+├── app.py                       # FastAPI 服务入口
+├── frontend/
+│   ├── index.html              # 页面入口
+│   ├── app.js                  # Vue 3 前端逻辑
+│   └── style.css               # 页面样式
+├── src/
+│   ├── core/
+│   │   ├── config.py           # 配置管理
+│   │   ├── logger.py           # 日志
 │   │   └── __init__.py
-│   │
-│   └── __init__.py
-│
-├── cli.py                         # 命令行入口
-├── README.md                      # 项目说明
-├── ARCHITECTURE.md                # 本文件
-├── requirements.txt               # Python依赖
-├── setup.py                       # 安装配置
-│
-└── docs/                          # 文档目录
-    ├── GETTING_STARTED.md         # 快速开始
-    ├── API.md                     # API文档
-    └── DEVELOPMENT.md             # 开发指南
+│   ├── ingestion/
+│   │   └── douyin/
+│   │       ├── processor.py    # 底层解析与下载
+│   │       ├── downloader.py   # 上层统一下载接口
+│   │       ├── __init__.py
+│   │       └── README.md
+│   ├── editing/
+│   ├── publishing/
+│   ├── workflow/
+│   └── utils/
+├── WEB_GUIDE.md
+├── README.md
+└── ARCHITECTURE.md
 ```
 
 ---
 
-## 📦 模块说明
+## 分层结构
 
-### 1. **src/core** - 核心模块
-
-**职责**：提供全局配置、日志、异常等基础设施
-
-#### config.py
-- 全局配置管理
-- 工作目录初始化
-- 文件路径管理
-
-```python
-from src.core import config, initialize_app
-
-# 初始化应用
-initialize_app()
-
-# 获取工作目录
-print(config.work_dir)  # '.data'
-print(config.get_video_path('video_123'))  # '.data/video_123.mp4'
+```text
+用户
+  ↓
+frontend/app.js
+  ↓
+app.py (FastAPI)
+  ↓
+src/ingestion/douyin/downloader.py
+  ↓
+src/ingestion/douyin/processor.py
+  ↓
+抖音页面 / 视频源站
 ```
 
-#### logger.py
-- 统一日志输出
-- 支持DEBUG模式
-- 时间戳和级别标记
+并行支撑模块：
 
-```python
-from src.core import logger
-
-logger.info("信息消息")
-logger.warn("警告消息")
-logger.error("错误消息")
-logger.debug("调试消息")  # 需要环境变量DEBUG=1
+```text
+app.py
+  ├─ src/core/config.py
+  ├─ src/core/logger.py
+  └─ SQLite 索引: .data/metadata/video_index.db
 ```
 
 ---
 
-### 2. **src/ingestion** - 资源采集层
+## 模块职责
 
-**职责**：从各平台采集视频、音频等原始资源
+### `frontend/app.js`
 
-#### douyin/ - 抖音采集模块（已实现）
+负责：
 
-**文件说明**：
-- `processor.py`: 核心处理器
-  - `DouyinProcessor`: 处理链接解析、重定向、HTML提取等底层操作
-  - `DouyinVideoInfo`: 视频信息数据类
-  - `DownloadProgress`: 下载进度数据类
+- 下载页交互
+- 视频管理页交互
+- 设置页交互
+- 调用 REST API
+- 轮询下载进度
 
-- `downloader.py`: 高级下载工具
-  - `DouyinDownloader`: 提供高级接口（get_download_link、download_video等）
-  - `get_downloader()`: 全局单例获取函数
+主要行为：
 
-**使用示例**：
+- 浏览本地目录
+- 自动识别视频标题
+- 视频名称规范化
+- 下载完成后刷新视频列表
+- 视频管理页批量选择、删除、打开文件和复制路径
 
-```python
-from src.ingestion.douyin import get_downloader
+### `app.py`
 
-# 获取下载器
-downloader = get_downloader()
+负责：
 
-# 获取下载链接
-result = downloader.get_download_link("https://v.douyin.com/xxxxx")
-if result['status'] == 'success':
-    print(f"链接: {result['download_url']}")
+- 提供 Web API
+- 维护下载进度状态
+- 管理 SQLite 视频索引
+- 处理打开文件、打开目录等本地操作
+- 启动后台索引修复任务
 
-# 下载视频
-def on_progress(progress):
-    print(f"进度: {progress['percentage']:.1f}%")
+主要接口包括：
 
-result = downloader.download_video(
-    "https://v.douyin.com/xxxxx",
-    on_progress=on_progress
-)
-if result['status'] == 'success':
-    print(f"文件: {result['file_path']}")
+- `POST /api/videos/download`
+- `POST /api/videos/parse`
+- `GET /api/videos`
+- `GET /api/videos/{video_id}`
+- `DELETE /api/videos/{video_id}`
+- `POST /api/videos/batch-delete`
+- `POST /api/videos/{video_id}/open`
+- `POST /api/videos/{video_id}/open-folder`
+- `GET /api/download-progress`
+- `GET /api/browse-directory`
+- `GET /api/settings`
+- `PUT /api/settings`
+- `GET /api/status`
 
-# 解析视频信息
-result = downloader.parse_video_info("https://v.douyin.com/xxxxx")
+### `src/core/config.py`
+
+负责：
+
+- 读取环境变量
+- 初始化工作目录
+- 提供当前保存目录和超时配置
+- 生成视频保存路径
+
+核心配置项：
+
+- `work_dir`
+- `download_timeout`
+- `max_retries`
+
+### `src/ingestion/douyin/downloader.py`
+
+负责：
+
+- 向上层暴露统一接口
+- 把底层数据结构转换成字典
+- 同步运行时配置到 `DouyinProcessor`
+
+### `src/ingestion/douyin/processor.py`
+
+负责：
+
+- 从分享文本中提取 URL
+- 跟随短链接重定向
+- 提取视频 ID
+- 请求视频 HTML
+- 解析标题和无水印下载地址
+- 流式下载视频文件
+
+性能参数：
+
+- 文件下载分块大小：`256KB`
+- 下载超时：`(60, max(timeout, 300))`
+- 默认下载超时：`1200`
+
+---
+
+## 数据流
+
+### 下载流程
+
+```text
+用户输入抖音链接
+  ↓
+前端调用 /api/videos/parse（可选）
+  ↓
+前端调用 /api/videos/download
+  ↓
+app.py 更新当前下载状态
+  ↓
+DouyinDownloader.download_video()
+  ↓
+DouyinProcessor.parse_share_url()
+  ↓
+DouyinProcessor.download_video()
+  ↓
+文件保存到选定目录
+  ↓
+app.py 写入 SQLite 视频索引
+  ↓
+前端轮询 /api/download-progress
+```
+
+### 视频管理流程
+
+```text
+前端打开视频管理页
+  ↓
+GET /api/videos
+  ↓
+app.py 查询 SQLite 索引
+  ↓
+返回全部已索引视频
+  ↓
+前端展示标题、路径、大小、时间和操作按钮
+```
+
+### 删除流程
+
+```text
+前端发起单个或批量删除
+  ↓
+app.py 删除磁盘文件
+  ↓
+app.py 更新 SQLite 索引
+  ↓
+前端刷新列表
 ```
 
 ---
 
-### 3. **src/editing** - 内容编辑层
+## 索引设计
 
-**职责**：实现自动化视频剪辑、编辑功能
+视频管理页的数据来源是 SQLite：
 
-#### capcut/ - 剪映编辑模块（待实现）
-
-**规划功能**：
-- 视频剪辑（截取、拼接）
-- 音频处理（提取、调节、混音）
-- 字幕添加（自动生成、样式设置）
-- 特效添加（转场、滤镜、贴纸）
-- 自适应分辨率处理
-
-**预期接口**：
-
-```python
-from src.editing.capcut import CapCutEditor
-
-editor = CapCutEditor()
-editor.create_draft(title="视频标题")
-editor.add_video_track(video_path)
-editor.add_audio_track(audio_path)
-editor.add_subtitle(subtitle_text)
-editor.add_effects(effect_type="fade")
-editor.export(output_path)
+```text
+.data/metadata/video_index.db
 ```
 
----
+当前索引表：
 
-### 4. **src/publishing** - 内容发布层
-
-**职责**：实现多平台内容分发
-
-**规划平台**：
-- 抖音 (Douyin)
-- 微信视频号 (WeChat Channels)
-- B站 (Bilibili)
-- 快手 (Kuaishou)
-
-**预期接口**：
-
-```python
-from src.publishing.douyin import DouyinPublisher
-from src.publishing.wechat_channels import WeChatPublisher
-
-# 发布到抖音
-douyin_pub = DouyinPublisher(auth_token="xxx")
-douyin_pub.publish(
-    video_path="xxx.mp4",
-    title="视频标题",
-    tags=["短剧", "搞笑"]
-)
-
-# 发布到视频号
-wechat_pub = WeChatPublisher(auth_token="xxx")
-wechat_pub.publish(
-    video_path="xxx.mp4",
-    title="视频标题"
-)
+```sql
+CREATE TABLE videos (
+    video_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    file_path TEXT NOT NULL UNIQUE,
+    file_size INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    save_dir TEXT
+);
 ```
 
----
+设计目标：
 
-### 5. **src/workflow** - 工作流编排层
+- 不再依赖当前保存目录扫描
+- 能管理不同目录下的历史下载文件
+- 提高列表读取和批量删除效率
 
-**职责**：编排采集、编辑、发布等任务流
+### 后台修复
 
-**规划功能**：
-- 任务DAG定义
-- 自动化流程编排
-- 错误恢复和重试
-- 任务调度和监控
+应用启动后会创建后台协程，默认每 300 秒执行一次：
 
-**预期接口**：
+- 检查索引中的 `file_path` 是否仍存在
+- 删除已失效的索引记录
 
-```python
-from src.workflow import Pipeline
-
-# 定义流水线
-pipeline = Pipeline()
-pipeline.add_task('download', download_task)
-pipeline.add_task('edit', edit_task)
-pipeline.add_task('publish', publish_task)
-
-# 定义依赖关系
-pipeline.add_dependency('download', 'edit')
-pipeline.add_dependency('edit', 'publish')
-
-# 执行流水线
-result = pipeline.run(video_url="https://v.douyin.com/xxxxx")
-```
+这样视频列表加载时不需要每次全量检查文件存在性。
 
 ---
 
-### 6. **src/utils** - 工具库
+## 命名规则
 
-**职责**：提供通用工具函数
+用户输入的视频名称，或者自动识别出的标题，会在前后端统一按同一规则处理：
 
-**规划内容**：
-- 文件操作工具
-- 媒体格式转换
-- 文本处理（字幕、标签等）
-- 第三方API适配
+- 非中文、非英文、非数字字符替换为 `_`
+- 连续 `_` 折叠
+- 按 `_` 切分
+- 只保留前两个有效片段
+- 将这两个片段直接拼接
 
----
-
-## 🔄 数据流向
-
-```
-用户输入 URL
-    ↓
-[采集层] ingestion/douyin
-    ├─ 解析链接和元数据
-    ├─ 下载原始视频
-    └─ 输出: video.mp4, metadata.json
-    ↓
-[编辑层] editing/capcut
-    ├─ 自动剪辑
-    ├─ 添加字幕/特效
-    └─ 输出: edited_video.mp4
-    ↓
-[发布层] publishing/*
-    ├─ 生成平台适配内容
-    └─ 发布到各平台
-    ↓
-[工作流] workflow
-    └─ 管理整个流程，处理错误和重试
-```
+最终这个名称会作为实际保存文件名。
 
 ---
 
-## 📝 API 设计原则
+## 本地能力边界
 
-### 1. **统一返回格式**
-所有模块的主要函数都返回统一的结果字典：
+当前项目具备一些“仅适合本机运行”的能力：
 
-```python
-{
-    "status": "success" | "error",
-    "message": "操作消息",
-    # ... 其他字段取决于具体功能
-}
-```
+- 浏览本地目录
+- 打开视频文件
+- 打开所在文件夹
 
-### 2. **解耦设计**
-- 每个模块独立实现，不依赖其他模块
-- 通过明确的接口进行交互
-- 支持逐个模块的测试和扩展
-
-### 3. **渐进式实现**
-- 优先实现核心功能（采集层已完成）
-- 保留插件接口（editing、publishing层预留）
-- 支持第三方扩展
+这些操作依赖服务端运行机器本身的桌面环境，因此当前架构更适合本机工具型使用，不适合直接当成纯远程无界面服务。
 
 ---
 
-## 🛠️ 开发快速指南
+## 后续扩展建议
 
-### 环境设置
+在当前架构上继续扩展时，建议优先保持以下原则：
 
-```bash
-# 克隆项目
-git clone <repo_url>
-cd ViralDramaBot
-
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-### 运行示例
-
-```bash
-# 下载视频
-python cli.py douyin download "https://v.douyin.com/xxxxx"
-
-# 获取下载链接
-python cli.py douyin get-link "https://v.douyin.com/xxxxx"
-
-# 解析视频信息
-python cli.py douyin parse "https://v.douyin.com/xxxxx"
-```
-
-### 添加新功能
-
-1. **添加采集来源**：在 `src/ingestion/` 中创建新目录
-2. **添加编辑功能**：在 `src/editing/capcut/` 中实现接口
-3. **添加发布平台**：在 `src/publishing/` 中创建新目录
-
----
-
-## 📊 项目里程碑
-
-- [x] **Phase 1**：核心架构设计和抖音采集实现
-- [ ] **Phase 2**：剪映编辑功能集成
-- [ ] **Phase 3**：多平台发布能力
-- [ ] **Phase 4**：工作流编排和自动化
-- [ ] **Phase 5**：Web UI和API服务
-
----
-
-## 🔗 相关文档
-
-- [快速开始指南](docs/GETTING_STARTED.md)
-- [完整 API 文档](docs/API.md)
-- [开发贡献指南](docs/DEVELOPMENT.md)
-- [抖音采集模块文档](src/ingestion/douyin/README.md)
-
----
-
-## 📄 许可证
-
-MIT License
+- 平台解析逻辑继续放在 `src/ingestion/<platform>/processor.py`
+- Web 层只处理状态、索引和接口，不直接承载复杂平台逻辑
+- 所有历史资产统一进入数据库索引
+- 大批量任务逐步迁移到任务队列而不是单个后台任务

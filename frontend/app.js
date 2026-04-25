@@ -8,22 +8,25 @@
  * - 完整的短剧处理流程
  */
 
-const { createApp, ref, reactive, computed, onMounted } = Vue;
+const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch } = Vue;
 
 // ============================================================================
 // API 客户端
 // ============================================================================
 
 const API_BASE_URL = "http://localhost:8000/api";
+const DOWNLOAD_SAVE_PATH_KEY = "viraldramabot.download.savePath";
 
 const api = {
     /**
      * 下载视频
      */
-    downloadVideo: async (link) => {
+    downloadVideo: async (link, savePath, fileName) => {
         try {
             const response = await axios.post(`${API_BASE_URL}/videos/download`, {
-                link: link
+                link: link,
+                save_path: savePath || undefined,
+                file_name: fileName || undefined
             });
             return response.data;
         } catch (error) {
@@ -67,12 +70,67 @@ const api = {
         }
     },
 
+    batchDeleteVideos: async (videoIds) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/videos/batch-delete`, {
+                video_ids: videoIds
+            });
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    openVideo: async (videoId) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/videos/${videoId}/open`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    openVideoFolder: async (videoId) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/videos/${videoId}/open-folder`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     /**
      * 获取下载进度
      */
     getDownloadProgress: async () => {
         try {
             const response = await axios.get(`${API_BASE_URL}/download-progress`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    /**
+     * 浏览本地目录
+     */
+    browseDirectory: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/browse-directory`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    /**
+     * 解析视频信息
+     */
+    parseVideoInfo: async (link) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/videos/parse`, {
+                link: link
+            });
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -163,7 +221,7 @@ const app = createApp({
                     <download-page 
                         :api="api"
                         :settings="settings"
-                        @download="handleDownload"
+                        @completed="handleDownloadCompleted"
                     />
                 </div>
 
@@ -193,7 +251,7 @@ const app = createApp({
         const videos = ref([]);
         const settings = ref({
             video_dir: '.data',
-            download_timeout: 60,
+            download_timeout: 1200,
             max_retries: 3
         });
         const messages = ref([]);
@@ -233,26 +291,17 @@ const app = createApp({
             }, 3000);
         };
 
-        // 处理下载
-        const handleDownload = async (link) => {
-            try {
-                showMessage('✅ 下载已启动，请稍候...', 'success');
-                await api.downloadVideo(link);
-                
-                // 等待 5 秒后刷新视频列表
-                setTimeout(() => {
-                    loadVideos();
-                }, 5000);
-            } catch (error) {
-                showMessage(`❌ 下载失败: ${error.message || error}`, 'danger');
-            }
+        const handleDownloadCompleted = () => {
+            loadVideos();
+            showMessage('✅ 视频下载完成，已刷新视频列表', 'success');
         };
 
         // 处理保存设置
         const handleSaveSettings = async (newSettings) => {
             try {
-                await api.updateSettings(newSettings);
-                settings.value = newSettings;
+                const result = await api.updateSettings(newSettings);
+                settings.value = result.settings;
+                localStorage.setItem(DOWNLOAD_SAVE_PATH_KEY, result.settings.video_dir);
                 showMessage('✅ 设置已保存', 'success');
             } catch (error) {
                 showMessage(`❌ 保存设置失败: ${error.message || error}`, 'danger');
@@ -274,7 +323,7 @@ const app = createApp({
             loadVideos,
             loadSettings,
             showMessage,
-            handleDownload,
+            handleDownloadCompleted,
             handleSaveSettings
         };
     }
@@ -286,12 +335,12 @@ const app = createApp({
 
 app.component('download-page', {
     props: ['api', 'settings'],
-    emits: ['download'],
+    emits: ['completed'],
     template: `
         <div>
             <div class="header">
                 <h1>📥 视频下载</h1>
-                <p>输入抖音分享链接，一键下载无水印视频</p>
+                <p>输入抖音分享链接，支持下载约 20 分钟内的视频并实时查看保存进度</p>
             </div>
 
             <div class="card">
@@ -304,16 +353,57 @@ app.component('download-page', {
                         type="url"
                         placeholder="输入抖音视频分享链接，如: https://v.douyin.com/7PkMlgCQjjY/"
                         @keyup.enter="submit"
+                        @blur="hydrateVideoName(false)"
                     />
                 </div>
 
                 <div class="form-group">
+                    <label>视频名称</label>
+                    <div class="row">
+                        <div class="col">
+                            <input
+                                v-model="videoName"
+                                type="text"
+                                placeholder="可自定义保存名称，默认自动读取视频标题"
+                                @input="videoNameTouched = true"
+                                @blur="normalizeCurrentVideoName"
+                            />
+                        </div>
+                        <div style="display: flex; align-items: end;">
+                            <button
+                                class="btn btn-secondary"
+                                @click="hydrateVideoName(true)"
+                                :disabled="isLoading || isParsingInfo || !link"
+                            >
+                                <span v-if="!isParsingInfo">✨ 识别标题</span>
+                                <span v-else>识别中...</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
                     <label>保存目录</label>
-                    <input 
-                        v-model="savePath"
-                        type="text"
-                        placeholder="视频保存目录，默认为 .data"
-                    />
+                    <div class="row">
+                        <div class="col">
+                            <input 
+                                :value="savePath"
+                                type="text"
+                                placeholder="请选择视频保存目录"
+                                readonly
+                            />
+                        </div>
+                        <div style="display: flex; align-items: end;">
+                            <button
+                                class="btn btn-secondary"
+                                @click="browseSavePath"
+                                :disabled="isLoading || isBrowsing"
+                            >
+                                <span v-if="!isBrowsing">📁 浏览</span>
+                                <span v-else>选择中...</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="row">
@@ -343,6 +433,7 @@ app.component('download-page', {
                 <div class="progress-text">
                     {{ progress.percentage.toFixed(1) }}% - {{ formatBytes(progress.downloaded) }} / {{ formatBytes(progress.total) }}
                 </div>
+                <p class="mt-2"><strong>保存路径：</strong>{{ progress.file_path || savePath || settings.video_dir }}</p>
                 <p class="mt-2" :class="{'text-success': progress.status === 'completed', 'text-danger': progress.status === 'error'}">
                     {{ progress.message }}
                 </p>
@@ -352,11 +443,9 @@ app.component('download-page', {
             <div class="card">
                 <div class="card-title">💡 使用提示</div>
                 <ul style="margin-left: 20px;">
-                    <li>支持抖音短链接（v.douyin.com）和长链接</li>
+                    <li>支持抖音短链接和长链接</li>
                     <li>自动获取无水印版本</li>
-                    <li>支持最长 20 分钟的短视频下载</li>
-                    <li>下载时间取决于网络速度和文件大小</li>
-                    <li>视频默认保存到 <code>.data</code> 目录，可在上方自定义</li>
+                    <li>下载时间取决于网络速度和文件大小，较大文件建议耐心等待</li>
                 </ul>
             </div>
         </div>
@@ -364,44 +453,157 @@ app.component('download-page', {
 
     setup(props, { emit }) {
         const link = ref('');
-        const savePath = ref('');
+        const videoName = ref('');
+        const savePath = ref(localStorage.getItem(DOWNLOAD_SAVE_PATH_KEY) || props.settings.video_dir || '.data');
         const isLoading = ref(false);
+        const isBrowsing = ref(false);
+        const isParsingInfo = ref(false);
+        const currentTaskStarted = ref(false);
+        const videoNameTouched = ref(false);
         const progress = ref({
             status: 'idle',
             percentage: 0,
             downloaded: 0,
             total: 0,
-            message: '就绪'
+            message: '就绪',
+            file_path: props.settings.video_dir || '.data'
         });
 
         // 定时更新进度
         let progressInterval = null;
 
+        const stopProgressPolling = () => {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+                progressInterval = null;
+            }
+        };
+
+        const fetchProgress = async () => {
+            try {
+                const result = await props.api.getDownloadProgress();
+                progress.value = {
+                    status: result.status || 'idle',
+                    percentage: result.percentage || 0,
+                    downloaded: result.downloaded || 0,
+                    total: result.total || 0,
+                    message: result.message || '就绪',
+                    file_path: result.file_path || savePath.value || props.settings.video_dir
+                };
+
+                if (result.status === 'completed') {
+                    stopProgressPolling();
+                    isLoading.value = false;
+                    if (currentTaskStarted.value) {
+                        currentTaskStarted.value = false;
+                        emit('completed');
+                    }
+                } else if (result.status === 'error') {
+                    stopProgressPolling();
+                    isLoading.value = false;
+                    currentTaskStarted.value = false;
+                } else if (result.status === 'downloading') {
+                    isLoading.value = true;
+                }
+            } catch (error) {
+                console.error('获取进度失败', error);
+            }
+        };
+
+        const startProgressPolling = async () => {
+            stopProgressPolling();
+            await fetchProgress();
+            progressInterval = setInterval(fetchProgress, 1000);
+        };
+
+        const browseSavePath = async () => {
+            if (isLoading.value || isBrowsing.value) return;
+
+            isBrowsing.value = true;
+            try {
+                const result = await props.api.browseDirectory();
+                if (result.status === 'success' && result.path) {
+                    savePath.value = result.path;
+                    localStorage.setItem(DOWNLOAD_SAVE_PATH_KEY, result.path);
+                }
+            } catch (error) {
+                console.error('选择目录失败', error);
+            } finally {
+                isBrowsing.value = false;
+            }
+        };
+
+        const normalizeVideoName = (value) => {
+            const normalized = (value || '')
+                .replace(/[^A-Za-z0-9\u4e00-\u9fff]+/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            const parts = normalized.split('_').filter(Boolean);
+            return parts.slice(0, 2).join('');
+        };
+
+        const normalizeCurrentVideoName = () => {
+            videoName.value = normalizeVideoName(videoName.value);
+        };
+
+        const hydrateVideoName = async (force = false) => {
+            if (!link.value || isParsingInfo.value) return;
+            if (!force && videoNameTouched.value && videoName.value) return;
+
+            isParsingInfo.value = true;
+            try {
+                const result = await props.api.parseVideoInfo(link.value);
+                const suggestedName = result.title || result.description || result.video_id || '';
+                if (suggestedName && (!videoNameTouched.value || !videoName.value || force === true)) {
+                    videoName.value = normalizeVideoName(suggestedName);
+                    videoNameTouched.value = false;
+                }
+            } catch (error) {
+                console.error('解析视频信息失败', error);
+            } finally {
+                isParsingInfo.value = false;
+            }
+        };
+
         const submit = async () => {
             if (!link.value) return;
 
             isLoading.value = true;
-            try {
-                emit('download', link.value);
-                link.value = '';
+            currentTaskStarted.value = true;
+            progress.value = {
+                status: 'downloading',
+                percentage: 0,
+                downloaded: 0,
+                total: 0,
+                message: '正在启动下载任务...',
+                file_path: savePath.value || props.settings.video_dir
+            };
 
-                // 启动进度监测
-                if (progressInterval) clearInterval(progressInterval);
-                progressInterval = setInterval(async () => {
-                    try {
-                        const result = await props.api.getDownloadProgress();
-                        progress.value = result;
-                        
-                        if (result.status === 'completed' || result.status === 'error') {
-                            clearInterval(progressInterval);
-                            isLoading.value = false;
-                        }
-                    } catch (error) {
-                        console.error('获取进度失败', error);
-                    }
-                }, 1000);
+            try {
+                normalizeCurrentVideoName();
+                await startProgressPolling();
+                const result = await props.api.downloadVideo(
+                    link.value,
+                    savePath.value,
+                    videoName.value
+                );
+                progress.value = {
+                    ...progress.value,
+                    file_path: result.save_path || progress.value.file_path,
+                    message: `下载任务已启动，目标目录: ${result.save_path || savePath.value}`
+                };
+                link.value = '';
+                videoName.value = '';
+                videoNameTouched.value = false;
             } catch (error) {
+                stopProgressPolling();
                 isLoading.value = false;
+                currentTaskStarted.value = false;
+                progress.value = {
+                    ...progress.value,
+                    status: 'error',
+                    message: `下载失败: ${error.message || error}`
+                };
                 console.error(error);
             }
         };
@@ -414,12 +616,40 @@ app.component('download-page', {
             return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         };
 
+        watch(
+            () => props.settings.video_dir,
+            (newValue) => {
+                if (!savePath.value || progress.value.status === 'idle') {
+                    savePath.value = localStorage.getItem(DOWNLOAD_SAVE_PATH_KEY) || newValue || '.data';
+                }
+            },
+            { immediate: true }
+        );
+
+        onMounted(async () => {
+            await fetchProgress();
+            if (progress.value.status === 'downloading') {
+                progressInterval = setInterval(fetchProgress, 1000);
+            }
+        });
+
+        onBeforeUnmount(() => {
+            stopProgressPolling();
+        });
+
         return {
             link,
+            videoName,
             savePath,
             isLoading,
+            isBrowsing,
+            isParsingInfo,
             progress,
             submit,
+            browseSavePath,
+            hydrateVideoName,
+            normalizeCurrentVideoName,
+            videoNameTouched,
             formatBytes
         };
     }
@@ -439,9 +669,21 @@ app.component('videos-page', {
                     <h1>📺 视频管理</h1>
                     <p>已下载 {{ videos.length }} 个视频</p>
                 </div>
-                <button class="btn btn-primary" @click="reload">
-                    🔄 刷新
-                </button>
+                <div class="row">
+                    <button class="btn btn-secondary" @click="toggleSelectAll">
+                        {{ allSelected ? '取消全选' : '全选' }}
+                    </button>
+                    <button
+                        class="btn btn-danger"
+                        @click="deleteSelected"
+                        :disabled="selectedIds.length === 0"
+                    >
+                        🗑️ 批量删除
+                    </button>
+                    <button class="btn btn-primary" @click="reload">
+                        🔄 刷新
+                    </button>
+                </div>
             </div>
 
             <div v-if="videos.length === 0" class="card text-center">
@@ -452,11 +694,22 @@ app.component('videos-page', {
             </div>
 
             <div v-else>
+                <div class="card" style="padding: 14px 20px;">
+                    已选择 {{ selectedIds.length }} / {{ videos.length }} 个视频
+                    <span v-if="batchActionMessage" class="inline-feedback">{{ batchActionMessage }}</span>
+                </div>
                 <table class="table">
                     <thead>
                         <tr>
-                            <th>视频 ID</th>
+                            <th>
+                                <input
+                                    type="checkbox"
+                                    :checked="allSelected"
+                                    @change="toggleSelectAll"
+                                />
+                            </th>
                             <th>标题</th>
+                            <th>具体路径</th>
                             <th>文件大小</th>
                             <th>创建时间</th>
                             <th>操作</th>
@@ -464,17 +717,54 @@ app.component('videos-page', {
                     </thead>
                     <tbody>
                         <tr v-for="video in videos" :key="video.video_id">
-                            <td><code style="background: #f5f5f5; padding: 2px 6px; border-radius: 3px;">{{ video.video_id }}</code></td>
+                            <td>
+                                <input
+                                    type="checkbox"
+                                    :checked="selectedIds.includes(video.video_id)"
+                                    @change="toggleSelection(video.video_id)"
+                                />
+                            </td>
                             <td class="truncate" :title="video.title">{{ video.title }}</td>
+                            <td>
+                                <div class="path-cell" :title="video.file_path">{{ video.file_path }}</div>
+                                <div class="path-actions mt-1">
+                                    <button
+                                        class="btn btn-secondary btn-small"
+                                        @click="copyPath(video.file_path)"
+                                    >
+                                        复制路径
+                                    </button>
+                                    <span
+                                        v-if="copiedPath === video.file_path"
+                                        class="copy-hint"
+                                    >
+                                        已复制
+                                    </span>
+                                </div>
+                            </td>
                             <td>{{ formatBytes(video.file_size) }}</td>
                             <td>{{ formatDate(video.created_at) }}</td>
                             <td>
-                                <button 
-                                    class="btn btn-danger btn-small"
-                                    @click="deleteVideo(video.video_id)"
-                                >
-                                    🗑️ 删除
-                                </button>
+                                <div class="action-group">
+                                    <button
+                                        class="btn btn-secondary btn-small"
+                                        @click="openVideo(video.video_id)"
+                                    >
+                                        打开
+                                    </button>
+                                    <button
+                                        class="btn btn-secondary btn-small"
+                                        @click="openVideoFolder(video.video_id)"
+                                    >
+                                        打开文件夹
+                                    </button>
+                                    <button 
+                                        class="btn btn-danger btn-small"
+                                        @click="deleteVideo(video.video_id)"
+                                    >
+                                        🗑️ 删除
+                                    </button>
+                                </div>
                             </td>
                         </tr>
                     </tbody>
@@ -484,8 +774,34 @@ app.component('videos-page', {
     `,
 
     setup(props, { emit }) {
+        const selectedIds = ref([]);
+        const copiedPath = ref('');
+        const batchActionMessage = ref('');
+        let copyHintTimer = null;
+        let batchActionTimer = null;
+        const allSelected = computed(
+            () => props.videos.length > 0 && selectedIds.value.length === props.videos.length
+        );
+
         const reload = () => {
+            selectedIds.value = [];
             emit('reload');
+        };
+
+        const toggleSelection = (videoId) => {
+            if (selectedIds.value.includes(videoId)) {
+                selectedIds.value = selectedIds.value.filter(id => id !== videoId);
+                return;
+            }
+            selectedIds.value = [...selectedIds.value, videoId];
+        };
+
+        const toggleSelectAll = () => {
+            if (allSelected.value) {
+                selectedIds.value = [];
+                return;
+            }
+            selectedIds.value = props.videos.map(video => video.video_id);
         };
 
         const deleteVideo = async (videoId) => {
@@ -497,6 +813,58 @@ app.component('videos-page', {
                 } catch (error) {
                     alert('❌ 删除失败: ' + (error.message || error));
                 }
+            }
+        };
+
+        const deleteSelected = async () => {
+            if (selectedIds.value.length === 0) return;
+            if (!confirm(`确定要删除选中的 ${selectedIds.value.length} 个视频吗？`)) return;
+
+            try {
+                await props.api.batchDeleteVideos(selectedIds.value);
+                reload();
+                batchActionMessage.value = '已批量删除选中视频';
+                if (batchActionTimer) {
+                    clearTimeout(batchActionTimer);
+                }
+                batchActionTimer = setTimeout(() => {
+                    batchActionMessage.value = '';
+                    batchActionTimer = null;
+                }, 2000);
+            } catch (error) {
+                alert('❌ 批量删除失败: ' + (error.message || error));
+            }
+        };
+
+        const openVideo = async (videoId) => {
+            try {
+                await props.api.openVideo(videoId);
+            } catch (error) {
+                alert('❌ 打开视频失败: ' + (error.message || error));
+            }
+        };
+
+        const openVideoFolder = async (videoId) => {
+            try {
+                await props.api.openVideoFolder(videoId);
+            } catch (error) {
+                alert('❌ 打开文件夹失败: ' + (error.message || error));
+            }
+        };
+
+        const copyPath = async (filePath) => {
+            try {
+                await navigator.clipboard.writeText(filePath);
+                copiedPath.value = filePath;
+                if (copyHintTimer) {
+                    clearTimeout(copyHintTimer);
+                }
+                copyHintTimer = setTimeout(() => {
+                    copiedPath.value = '';
+                    copyHintTimer = null;
+                }, 2000);
+            } catch (error) {
+                alert('❌ 复制路径失败: ' + (error.message || error));
             }
         };
 
@@ -519,7 +887,17 @@ app.component('videos-page', {
 
         return {
             reload,
+            selectedIds,
+            copiedPath,
+            batchActionMessage,
+            allSelected,
+            toggleSelection,
+            toggleSelectAll,
             deleteVideo,
+            deleteSelected,
+            openVideo,
+            openVideoFolder,
+            copyPath,
             formatBytes,
             formatDate
         };
@@ -545,11 +923,26 @@ app.component('settings-page', {
 
                 <div class="form-group">
                     <label>视频保存目录</label>
-                    <input 
-                        v-model="formData.video_dir"
-                        type="text"
-                        placeholder="输入视频保存目录，如: .data 或 /home/user/videos"
-                    />
+                    <div class="row">
+                        <div class="col">
+                            <input 
+                                :value="formData.video_dir"
+                                type="text"
+                                placeholder="请选择视频保存目录"
+                                readonly
+                            />
+                        </div>
+                        <div style="display: flex; align-items: end;">
+                            <button
+                                class="btn btn-secondary"
+                                @click="browseVideoDir"
+                                :disabled="isBrowsing"
+                            >
+                                <span v-if="!isBrowsing">📁 浏览</span>
+                                <span v-else>选择中...</span>
+                            </button>
+                        </div>
+                    </div>
                     <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
                         默认值: .data
                     </p>
@@ -560,11 +953,11 @@ app.component('settings-page', {
                     <input 
                         v-model.number="formData.download_timeout"
                         type="number"
-                        min="10"
-                        max="300"
+                        min="60"
+                        max="1800"
                     />
                     <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
-                        单次下载操作的最大超时时间，适当增加可支持更大文件下载
+                        建议保留 1200 秒左右，可支持约 20 分钟视频的完整下载过程
                     </p>
                 </div>
 
@@ -616,6 +1009,24 @@ app.component('settings-page', {
             download_timeout: props.settings.download_timeout,
             max_retries: props.settings.max_retries
         });
+        const isBrowsing = ref(false);
+
+        const browseVideoDir = async () => {
+            if (isBrowsing.value) return;
+
+            isBrowsing.value = true;
+            try {
+                const result = await props.api.browseDirectory();
+                if (result.status === 'success' && result.path) {
+                    formData.video_dir = result.path;
+                    localStorage.setItem(DOWNLOAD_SAVE_PATH_KEY, result.path);
+                }
+            } catch (error) {
+                alert('❌ 选择目录失败: ' + (error.message || error));
+            } finally {
+                isBrowsing.value = false;
+            }
+        };
 
         const save = async () => {
             try {
@@ -627,6 +1038,8 @@ app.component('settings-page', {
 
         return {
             formData,
+            isBrowsing,
+            browseVideoDir,
             save
         };
     }

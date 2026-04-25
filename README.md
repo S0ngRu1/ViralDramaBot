@@ -1,324 +1,250 @@
-# ViralDramaBot 🎬
+# ViralDramaBot
 
-**一站式短剧自动化流水线：从资源采集、智能剪辑 到 多平台矩阵发布的全链路解决方案**
-
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-green.svg)](#)
+短剧素材下载与管理工具。当前已实现的是一套可直接使用的抖音下载 Web 应用，支持下载、进度查看、目录选择、视频管理和基础配置。
 
 ---
 
-## ✨ 核心特性
+## 当前状态
 
-### 🎯 采集层（已实现）
-- ✅ **抖音视频下载** - 支持短链接解析，自动跟随重定向
-- ✅ **无水印转换** - 自动获取无水印版本下载链接
-- ✅ **元数据提取** - 自动提取视频标题、ID等信息
-- ✅ **URL反转义** - 处理JSON编码的特殊字符
-- ✅ **进度显示** - 实时下载进度反馈
+已实现：
 
-### ✂️ 编辑层（规划中）
-- 📋 自动化视频剪辑
-- 🎵 音频处理和混音
-- 📝 字幕自动生成和样式设置
-- ✨ 特效和转场添加
-- 🎨 自适应分辨率处理
+- 抖音短链接和长链接解析
+- 无水印下载
+- 下载进度轮询
+- 下载页选择保存目录
+- 下载页自动识别并自定义视频名称
+- 视频名称规范化后保存
+- 视频管理页查看所有已索引视频
+- 全选、批量删除、打开文件、打开所在文件夹、复制路径
+- SQLite 视频索引
+- 后台定时修复失效索引记录
 
-### 📢 发布层（规划中）
-- 📱 抖音发布
-- 💬 微信视频号发布
-- 🎬 B站发布
-- 🚀 快手发布
-- 📊 发布统计和管理
+规划中：
 
-### 🔄 工作流（规划中）
-- 🔗 任务编排和DAG定义
-- ⏰ 自动调度和执行
-- 🛡️ 错误处理和重试机制
-- 📈 任务监控和日志
+- 编辑流水线
+- 多平台发布
+- 更完整的工作流编排
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
-### 前置条件
-- Python 3.8 或更高版本
-- pip 包管理工具
+### 环境要求
+
+- Python 3.8+
+- `pip`
 
 ### 安装
 
 ```bash
-# 克隆项目
 git clone <repository_url>
 cd ViralDramaBot
 
-# 创建虚拟环境（推荐）
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 基础使用
+### 启动 Web 应用
 
 ```bash
-# 查看帮助
-python cli.py --help
-
-# 下载抖音视频
-python cli.py douyin download "https://v.douyin.com/xxxxx"
-
-# 获取无水印下载链接（不下载）
-python cli.py douyin get-link "https://v.douyin.com/xxxxx"
-
-# 解析视频信息
-python cli.py douyin parse "https://v.douyin.com/xxxxx"
+python app.py
 ```
 
-### Python API 使用
+启动后访问：
 
-```python
-from src.core import initialize_app
-from src.ingestion.douyin import get_downloader
+- 首页: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
 
-# 初始化应用
-initialize_app()
+也可以使用：
 
-# 获取下载器
-downloader = get_downloader()
+```bash
+bash start-web.sh
+```
 
-# 下载视频
-def on_progress(progress):
-    percentage = progress['percentage']
-    print(f"下载进度: {percentage:.1f}%")
+Windows:
 
-result = downloader.download_video(
-    share_link="https://v.douyin.com/xxxxx",
-    on_progress=on_progress
-)
-
-if result['status'] == 'success':
-    print(f"✅ 下载完成: {result['file_path']}")
-else:
-    print(f"❌ 下载失败: {result['message']}")
+```bash
+start-web.bat
 ```
 
 ---
 
-## 📁 项目结构
+## 主要功能
 
-```
+### 1. 视频下载
+
+- 输入抖音分享链接
+- 点击浏览按钮选择本地保存目录
+- 可自动识别标题，也可手动修改视频名称
+- 下载开始后立即显示进度条和保存路径
+
+视频名称保存规则：
+
+- 只保留中文、英文、数字
+- 其他字符统一替换成 `_`
+- 按 `_` 切分后只保留前两个有效片段
+- 最终将这两个片段直接拼接后作为文件名
+
+### 2. 视频管理
+
+视频管理页显示的是 SQLite 索引中的全部视频，而不是当前保存目录下的文件。
+
+支持：
+
+- 查看所有已索引视频
+- 显示保存时的最终文件名
+- 显示完整路径、文件大小、创建时间
+- 全选 / 取消全选
+- 批量删除
+- 打开文件
+- 打开所在文件夹
+- 复制完整路径
+
+### 3. 应用设置
+
+支持配置：
+
+- 默认保存目录
+- 下载超时时间
+- 最大重试次数
+
+---
+
+## 项目结构
+
+```text
 ViralDramaBot/
+├── app.py
+├── cli.py
+├── frontend/
+│   ├── index.html
+│   ├── app.js
+│   └── style.css
 ├── src/
-│   ├── core/                    # 核心模块（配置、日志）
-│   ├── ingestion/               # 资源采集层
-│   │   └── douyin/              # 抖音采集模块 ✅
-│   ├── editing/                 # 内容编辑层（规划中）
-│   │   └── capcut/              # 剪映编辑模块
-│   ├── publishing/              # 内容发布层（规划中）
-│   ├── workflow/                # 工作流层（规划中）
-│   └── utils/                   # 工具库
-├── cli.py                       # 命令行入口
-├── requirements.txt             # Python依赖
-├── ARCHITECTURE.md              # 项目架构文档
-└── README.md                    # 本文件
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── logger.py
+│   │   └── __init__.py
+│   ├── ingestion/
+│   │   └── douyin/
+│   │       ├── __init__.py
+│   │       ├── processor.py
+│   │       ├── downloader.py
+│   │       └── README.md
+│   ├── editing/
+│   ├── publishing/
+│   ├── workflow/
+│   └── utils/
+├── ARCHITECTURE.md
+├── WEB_GUIDE.md
+└── requirements.txt
 ```
 
-详细的架构说明请查看 [ARCHITECTURE.md](ARCHITECTURE.md)
-
 ---
 
-## 📖 文档
-
-- **[项目架构文档](ARCHITECTURE.md)** - 详细的项目结构和设计说明
-- **[抖音采集模块文档](src/ingestion/douyin/README.md)** - 抖音采集API使用说明
-- **快速开始指南** - （待补充）
-- **完整API文档** - （待补充）
-- **开发贡献指南** - （待补充）
-
----
-
-## 🛠️ 配置
+## 配置
 
 ### 环境变量
 
 ```bash
-# 工作目录（默认: .data）
-export WORK_DIR="/path/to/work/dir"
-
-# 启用调试模式
-export DEBUG=1
-
-# 示例：下载视频到指定目录
-WORK_DIR="/videos" python cli.py douyin download "https://v.douyin.com/xxxxx"
+export WORK_DIR=".data"
+export DOWNLOAD_TIMEOUT="1200"
+export MAX_RETRIES="3"
+export DEBUG="1"
 ```
 
-### 自定义配置
+### 默认配置
 
-编辑 `src/core/config.py` 中的 `Config` 类：
+当前默认值来自 [src/core/config.py](/home/caisongrui/Workspace/ViralDramaBot/src/core/config.py)：
+
+- `WORK_DIR = .data`
+- `DOWNLOAD_TIMEOUT = 1200`
+- `MAX_RETRIES = 3`
+
+---
+
+## 存储说明
+
+### 视频文件
+
+视频文件保存到你在下载页或设置页选择的目录中。
+
+### 视频索引
+
+视频管理页的数据来自 SQLite 索引文件：
+
+```text
+.data/metadata/video_index.db
+```
+
+这份索引只记录通过当前应用成功下载并写入索引的视频。
+
+### 索引修复
+
+应用启动后会启动后台定时任务，默认每 300 秒检查一次 SQLite 索引，把磁盘上已经不存在的文件记录移除。
+
+---
+
+## 性能实现
+
+当前下载链路的几个关键点：
+
+- 抖音下载使用流式写入
+- 分块大小已调到 `256KB`
+- 视频索引使用 SQLite，而不是 JSON
+- 视频列表读取不再每次全量检查文件是否存在
+- 批量删除时会一次性更新索引
+
+---
+
+## Python 调用示例
 
 ```python
-class Config:
-    DEFAULT_WORK_DIR = '.data'      # 修改默认工作目录
-    # ... 其他配置
+from src.core import initialize_app, config
+from src.ingestion.douyin import get_downloader
+
+initialize_app()
+
+config.update(work_dir=".data", download_timeout=1200, max_retries=3)
+
+downloader = get_downloader()
+downloader.configure(
+    download_timeout=config.download_timeout,
+    max_retries=config.max_retries
+)
+
+def on_progress(progress):
+    print(progress["percentage"])
+
+result = downloader.download_video(
+    "https://v.douyin.com/xxxxx/",
+    on_progress=on_progress,
+    file_name="自定义视频名"
+)
+
+print(result)
 ```
 
 ---
 
-## 🔍 抖音采集功能详解
+## 文档
 
-### 支持的链接格式
-
-- ✅ 短链接：`https://v.douyin.com/xxxxx/`
-- ✅ 完整链接：`https://www.douyin.com/video/7374567890123456789`
-- ✅ 文本包含链接：`分享链接: https://v.douyin.com/xxxxx`
-
-### 工作流程
-
-```
-输入分享链接
-    ↓
-[URL提取] 正则表达式提取链接
-    ↓
-[重定向跟随] 自动处理301/302重定向
-    ↓
-[视频ID提取] 从URL中解析视频ID
-    ↓
-[页面获取] 请求视频页面HTML
-    ↓
-[信息提取] 从HTML正则提取下载链接和标题
-    ↓
-[URL反转义] 处理JSON编码的特殊字符
-    ↓
-[无水印转换] playwm→play替换为无水印版本
-    ↓
-[流式下载] 分块下载，显示进度
-    ↓
-完成 ✅
-```
-
-### 返回结果格式
-
-```python
-{
-    "status": "success",          # 状态
-    "message": "✅ 视频下载完成",   # 消息
-    "video_id": "7374567890123",  # 视频ID
-    "title": "视频标题",           # 视频标题
-    "file_path": ".data/xxx.mp4"  # 保存路径
-}
-```
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [WEB_GUIDE.md](./WEB_GUIDE.md)
+- [src/ingestion/douyin/README.md](./src/ingestion/douyin/README.md)
 
 ---
 
-## 🐛 故障排查
+## 说明
 
-### 问题1：无法下载，提示"Invalid URL"
+当前这套代码更偏“本机使用的工具型后台”，适合个人或小规模使用场景。
 
-**原因**：HTML中提取的URL被JSON编码，包含转义字符如`\u002F`
+如果后续要继续扩展，推荐优先方向是：
 
-**解决**：系统已内置JSON反转义机制，自动处理此问题
-
-### 问题2：权限错误 "Permission denied"
-
-**原因**：工作目录没有写入权限
-
-**解决**：
-```bash
-# 修改权限
-chmod 755 .data
-
-# 或更改工作目录
-mkdir -p ~/videos
-export WORK_DIR="~/videos"
-python cli.py douyin download "..."
-```
-
-### 问题3：下载超时或连接失败
-
-**原因**：网络问题或抖音服务器响应缓慢
-
-**解决**：
-```python
-from src.ingestion.douyin import DouyinProcessor
-
-# 增加超时时间和重试次数
-processor = DouyinProcessor(timeout=20, max_retries=5)
-```
-
-### 更多问题
-
-查看详细的故障排查指南：[TECHNICAL_DOCUMENTATION.md](TECHNICAL_DOCUMENTATION.md)
-
----
-
-## 🧪 测试
-
-```bash
-# 测试抖音视频下载
-python cli.py douyin download "https://v.douyin.com/e72G5usieXI/"
-
-# 验证下载的文件
-ls -lh .data/*.mp4
-```
-
----
-
-## 🗺️ 开发路线
-
-### Phase 1: 核心架构与采集（✅ 已完成）
-- [x] 项目结构重构
-- [x] 模块化设计
-- [x] 抖音采集功能完善
-- [x] 文档完善
-
-### Phase 2: 编辑功能（📋 规划中）
-- [ ] 集成剪映API
-- [ ] 实现视频剪辑
-- [ ] 字幕自动生成
-- [ ] 特效添加
-
-### Phase 3: 多平台发布（📋 规划中）
-- [ ] 抖音发布API
-- [ ] 微信视频号发布
-- [ ] B站发布
-- [ ] 快手发布
-
-### Phase 4: 工作流与自动化（📋 规划中）
-- [ ] DAG任务编排
-- [ ] 自动调度
-- [ ] 错误恢复
-- [ ] 监控告警
-
-### Phase 5: Web UI & 服务（🔮 未来）
-- [ ] Web仪表板
-- [ ] REST API服务
-- [ ] 队列系统
-- [ ] 数据库集成
-
----
-
-## 🤝 贡献指南
-
-欢迎提交 Issue 和 Pull Request！
-
-```bash
-# Fork 项目
-# 创建特性分支
-git checkout -b feature/your-feature
-
-# 提交更改
-git commit -am 'Add your feature'
-
-# 推送到分支
-git push origin feature/your-feature
-
-# 提交 Pull Request
-```
-
----
-
-## 📄 许可证
-
-本项目采用 **MIT License** - 详见 [LICENSE](LICENSE) 文件
+- 视频管理分页与筛选
+- 多目录分组展示
+- 更完整的任务队列
+- 编辑和发布链路接入

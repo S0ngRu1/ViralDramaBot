@@ -18,11 +18,19 @@ class Config:
     
     # 默认工作目录
     DEFAULT_WORK_DIR = '.data'
+    DEFAULT_DOWNLOAD_TIMEOUT = 1200
+    DEFAULT_MAX_RETRIES = 3
     
     def __init__(self):
         """初始化配置"""
         # 从环境变量读取工作目录，如果未设置则使用默认值
         self.work_dir = os.getenv('WORK_DIR', self.DEFAULT_WORK_DIR)
+        self.download_timeout = int(
+            os.getenv('DOWNLOAD_TIMEOUT', str(self.DEFAULT_DOWNLOAD_TIMEOUT))
+        )
+        self.max_retries = int(
+            os.getenv('MAX_RETRIES', str(self.DEFAULT_MAX_RETRIES))
+        )
         
         # 将工作目录转换为 Path 对象
         self.work_path = Path(self.work_dir)
@@ -71,17 +79,19 @@ class Config:
             logger.error(f"❌ 无法创建或访问工作目录 {self.work_dir}: {str(e)}")
             return False
     
-    def get_video_path(self, video_id: str) -> Path:
+    def get_video_path(self, video_id: str, file_name: str | None = None) -> Path:
         """
         获取视频文件路径
         
         Args:
             video_id: 视频ID
+            file_name: 自定义文件名（不含扩展名）
         
         Returns:
             Path: 视频文件的完整路径
         """
-        return self.work_path / f"{video_id}.mp4"
+        base_name = file_name or video_id
+        return self.work_path / f"{base_name}.mp4"
     
     def get_temp_path(self, filename: str) -> Path:
         """
@@ -94,6 +104,46 @@ class Config:
             Path: 临时文件的完整路径
         """
         return self.work_path / filename
+
+    def update(
+        self,
+        work_dir: str | None = None,
+        download_timeout: int | None = None,
+        max_retries: int | None = None
+    ) -> dict:
+        """
+        更新运行时配置
+
+        Args:
+            work_dir: 视频保存目录
+            download_timeout: 下载超时时间（秒）
+            max_retries: 最大重试次数
+
+        Returns:
+            dict: 更新后的配置快照
+        """
+        if work_dir is not None:
+            self.work_dir = str(work_dir)
+            self.work_path = Path(self.work_dir)
+
+        if download_timeout is not None:
+            self.download_timeout = int(download_timeout)
+
+        if max_retries is not None:
+            self.max_retries = int(max_retries)
+
+        if not self.initialize_work_dir():
+            raise ValueError(f"无法访问工作目录: {self.work_dir}")
+
+        return self.to_dict()
+
+    def to_dict(self) -> dict:
+        """返回当前配置快照"""
+        return {
+            "video_dir": str(self.work_dir),
+            "download_timeout": int(self.download_timeout),
+            "max_retries": int(self.max_retries)
+        }
 
 
 # 全局配置实例

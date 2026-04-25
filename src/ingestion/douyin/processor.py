@@ -79,8 +79,8 @@ class DouyinProcessor:
     # 备用下载 URL 模板
     BACKUP_URL_TEMPLATE = "https://aweme.snssdk.com/aweme/v1/play/?video_id={video_id}"
     
-    # 单个块的大小（8KB）
-    CHUNK_SIZE = 8192
+    # 单个块的大小（256KB）
+    CHUNK_SIZE = 262144
     
     def __init__(self, timeout: int = 10, max_retries: int = 3):
         """
@@ -94,6 +94,27 @@ class DouyinProcessor:
         self.download_timeout = (60, 300)  # (连接超时, 读取超时) - 支持20分钟视频下载
         self.max_retries = max_retries
         self.session = self._create_session()
+
+    def update_settings(
+        self,
+        timeout: Optional[int] = None,
+        max_retries: Optional[int] = None
+    ) -> None:
+        """
+        更新下载器运行时参数
+
+        Args:
+            timeout: 读取超时时间（秒）
+            max_retries: 最大重试次数
+        """
+        if timeout is not None:
+            timeout = int(timeout)
+            self.timeout = min(timeout, 60)
+            self.download_timeout = (60, max(timeout, 300))
+
+        if max_retries is not None:
+            self.max_retries = int(max_retries)
+            self.session = self._create_session()
     
     def _create_session(self) -> requests.Session:
         """
@@ -354,7 +375,8 @@ class DouyinProcessor:
     def download_video(
         self, 
         video_info: DouyinVideoInfo,
-        on_progress: Optional[Callable[[DownloadProgress], None]] = None
+        on_progress: Optional[Callable[[DownloadProgress], None]] = None,
+        file_name: Optional[str] = None
     ) -> str:
         """
         下载视频文件
@@ -369,6 +391,7 @@ class DouyinProcessor:
         Args:
             video_info: 视频信息对象
             on_progress: 进度回调函数（可选）
+            file_name: 自定义文件名（可选，不含扩展名）
         
         Returns:
             str: 下载文件的完整路径
@@ -377,7 +400,8 @@ class DouyinProcessor:
             Exception: 如果下载失败抛出异常
         """
         try:
-            output_path = config.get_video_path(video_info.video_id)
+            safe_file_name = self._sanitize_file_name(file_name or video_info.title or video_info.video_id)
+            output_path = config.get_video_path(video_info.video_id, safe_file_name)
             
             logger.info(f"📥 开始下载视频: {video_info.title}")
             logger.debug(f"下载 URL: {video_info.url}")
@@ -440,6 +464,15 @@ class DouyinProcessor:
                 except Exception:
                     pass
             raise
+
+    @staticmethod
+    def _sanitize_file_name(file_name: str) -> str:
+        """按项目规则清理文件名并裁剪为前两个有效片段"""
+        normalized = re.sub(r'[^A-Za-z0-9\u4e00-\u9fff]+', '_', file_name or "")
+        normalized = re.sub(r'_+', '_', normalized).strip('_')
+        parts = [part for part in normalized.split('_') if part]
+        sanitized = ''.join(parts[:2])
+        return sanitized or "douyin_video"
     
     @staticmethod
     def _format_bytes(bytes_size: int) -> str:

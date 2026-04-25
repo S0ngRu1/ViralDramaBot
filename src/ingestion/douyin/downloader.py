@@ -19,6 +19,17 @@ class DouyinDownloader:
     def __init__(self):
         """初始化下载工具"""
         self.processor = DouyinProcessor()
+
+    def configure(
+        self,
+        download_timeout: Optional[int] = None,
+        max_retries: Optional[int] = None
+    ) -> None:
+        """同步运行时下载配置到处理器"""
+        self.processor.update_settings(
+            timeout=download_timeout,
+            max_retries=max_retries
+        )
     
     @staticmethod
     def _format_result(
@@ -98,7 +109,8 @@ class DouyinDownloader:
     def download_video(
         self, 
         share_link: str,
-        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        file_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         下载抖音视频文件
@@ -112,6 +124,7 @@ class DouyinDownloader:
         Args:
             share_link: 抖音分享链接或包含链接的文本
             on_progress: 进度回调函数（可选）
+            file_name: 自定义保存文件名（可选）
         
         Returns:
             Dict: 包含以下字段的字典：
@@ -153,7 +166,8 @@ class DouyinDownloader:
             # 步骤3: 下载视频
             file_path = self.processor.download_video(
                 video_info,
-                on_progress=progress_wrapper if on_progress else None
+                on_progress=progress_wrapper if on_progress else None,
+                file_name=file_name
             )
             
             return self._format_result(
