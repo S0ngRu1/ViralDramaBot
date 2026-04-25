@@ -6,6 +6,11 @@
 requests>=2.28.0        # HTTP请求库
 urllib3>=1.26.0         # URL库
 
+# ============ Web 框架（API 服务）- 必需 ============
+fastapi>=0.104.0        # 现代异步 Web 框架
+uvicorn[standard]>=0.24.0  # ASGI 服务器
+python-multipart>=0.0.6  # 表单数据处理
+pydantic>=2.0.0         # 数据验证
 
 # ============ Phase 2+ 的依赖（可选，按需取消注释） ============
 

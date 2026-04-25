@@ -91,7 +91,7 @@ class DouyinProcessor:
             max_retries: 最大重试次数
         """
         self.timeout = timeout  # 用于普通请求（链接解析、页面获取）
-        self.download_timeout = (30, 60)  # (连接超时, 读取超时)，用于下载大文件
+        self.download_timeout = (60, 300)  # (连接超时, 读取超时) - 支持20分钟视频下载
         self.max_retries = max_retries
         self.session = self._create_session()
     
