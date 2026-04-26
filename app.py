@@ -74,9 +74,10 @@ INDEX_REPAIR_INTERVAL_SECONDS = 300
 # ============================================================================
 
 # 初始化应用
+config.update(work_dir=str(DATA_DIR))
 initialize_app()
 
-config.update(work_dir=str(DATA_DIR))
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="ViralDramaBot",

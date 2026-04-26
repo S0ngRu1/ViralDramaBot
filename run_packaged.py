@@ -57,8 +57,15 @@ def main():
     multiprocessing.freeze_support()
 
     def open_browser():
-        time.sleep(1.5)  # 等待 uvicorn 完全启动
-        webbrowser.open("http://127.0.0.1:8000")
+        time.sleep(1.5)
+        print("正在打开浏览器...", flush=True)
+        try:
+            # Windows 上最直接的方式
+            os.startfile("http://127.0.0.1:8000")
+        except Exception:
+            # 备用方案：调用 cmd start
+            import subprocess
+            subprocess.run(["cmd", "/c", "start", "http://127.0.0.1:8000"], shell=True)
 
     threading.Thread(target=open_browser, daemon=True).start()
 

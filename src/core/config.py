@@ -17,14 +17,17 @@ class Config:
     """配置类"""
     
     # 默认工作目录
-    DEFAULT_WORK_DIR = '.data'
+    DEFAULT_WORK_DIR = None 
     DEFAULT_DOWNLOAD_TIMEOUT = 1200
     DEFAULT_MAX_RETRIES = 3
     
     def __init__(self):
         """初始化配置"""
         # 从环境变量读取工作目录，如果未设置则使用默认值
-        self.work_dir = os.getenv('WORK_DIR', self.DEFAULT_WORK_DIR)
+        work_dir = os.getenv('WORK_DIR')
+        if not work_dir:
+            # 如果没有环境变量，在用户主目录下创建一个隐蔽目录作为最后退路
+            work_dir = Path.home() / '.viraldramabot_data'
         self.download_timeout = int(
             os.getenv('DOWNLOAD_TIMEOUT', str(self.DEFAULT_DOWNLOAD_TIMEOUT))
         )
