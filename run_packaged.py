@@ -32,15 +32,21 @@ def setup_env():
 def main():
     setup_env()
     
-    log_dir = Path(os.getenv("APPDATA")) / "ViralDramaBot"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # ===== 日志输出到控制台 =====
+    # 先确保 sys.stdout 正常（控制台已开启）
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
 
+    # 配置根 logger，输出到标准错误流
     logging.basicConfig(
-        filename=str(log_dir / "app.log"),
-        filemode='a',
+        stream=sys.stderr,
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True   # 强制覆盖已有配置
     )
+    # ============================
     
     # 延迟导入，确保 sys.path 已经处理完毕
     try:

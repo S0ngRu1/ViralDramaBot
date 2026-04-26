@@ -51,7 +51,6 @@ project_root = get_project_root()
 # 添加 src 目录到 Python 路径
 sys.path.insert(0, str(project_root))
 
-from src.core import initialize_app, config, logger
 from src.ingestion.douyin import get_downloader
 
 # ===== 新增：数据目录自动适配 =====
@@ -72,11 +71,10 @@ INDEX_REPAIR_INTERVAL_SECONDS = 300
 # ============================================================================
 # 初始化
 # ============================================================================
-
+from src.core import initialize_app, config, logger
 # 初始化应用
-config.update(work_dir=str(DATA_DIR))
 initialize_app()
-
+config.update(work_dir=str(DATA_DIR))
 
 # 创建 FastAPI 应用
 app = FastAPI(
