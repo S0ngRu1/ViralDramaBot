@@ -28,6 +28,7 @@ class Config:
         if not work_dir:
             # 如果没有环境变量，在用户主目录下创建一个隐蔽目录作为最后退路
             work_dir = Path.home() / '.viraldramabot_data'
+        self.work_dir = str(work_dir)
         self.download_timeout = int(
             os.getenv('DOWNLOAD_TIMEOUT', str(self.DEFAULT_DOWNLOAD_TIMEOUT))
         )
