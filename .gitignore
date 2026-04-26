@@ -5,3 +5,12 @@ __pycache__
 .claude/
 .idea/
 *.db
+/dist
+/build
+*.egg-info
+*.log
+*.bak
+*.tmp
+*.swp
+.DS_Store
+*.spec

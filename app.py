@@ -26,13 +26,36 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+# ============================================================================
+# 打包环境检测和路径处理
+# ============================================================================
+
+def get_project_root() -> Path:
+    """
+    获取项目根目录路径，支持打包环境
+
+    在打包版本中，sys.executable 是可执行文件的路径，
+    在开发环境中，使用当前脚本的路径。
+    """
+    if getattr(sys, 'frozen', False):
+        # 打包环境：sys.executable 是 .exe 文件路径
+        base_path = Path(sys.executable).parent
+    else:
+        # 开发环境：使用当前脚本所在目录
+        base_path = Path(__file__).parent
+
+    return base_path
+
+# 获取项目根目录
+project_root = get_project_root()
+
 # 添加 src 目录到 Python 路径
-project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from src.core import initialize_app, config, logger
 from src.ingestion.douyin import get_downloader
 
+# 数据目录路径（在打包环境中会创建在可执行文件旁边）
 VIDEO_METADATA_DIR = project_root / ".data" / "metadata"
 VIDEO_INDEX_DB_PATH = VIDEO_METADATA_DIR / "video_index.db"
 INDEX_REPAIR_INTERVAL_SECONDS = 300
