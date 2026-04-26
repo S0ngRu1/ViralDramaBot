@@ -5,6 +5,7 @@ ViralDramaBot 打包环境专用入口点
 用于处理 PyInstaller 打包后的路径定位并启动 FastAPI 服务
 """
 
+import io
 import os
 import sys
 import multiprocessing
@@ -30,6 +31,21 @@ def setup_env():
 
 def main():
     setup_env()
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    else:
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
+
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+    else:
+        try:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
     
     # 延迟导入，确保 sys.path 已经处理完毕
     try:
@@ -57,7 +73,8 @@ def main():
         app, 
         host="127.0.0.1", 
         port=8000, 
-        log_level="info"
+        log_level="info",
+        log_config=None
     )
 
 if __name__ == "__main__":
