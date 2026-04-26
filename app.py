@@ -14,20 +14,6 @@ ViralDramaBot Web 应用服务器
 import sys
 import asyncio
 import os
-import io
-
-# 强制标准输出使用 UTF-8 编码，避免 Windows GBK 无法输出 emoji
-if sys.stdout is not None:
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    except (AttributeError, ValueError):
-        pass  # 如果无法包装，则保持原样
-
-if sys.stderr is not None:
-    try:
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-    except (AttributeError, ValueError):
-        pass
 
 
 import platform

@@ -5,7 +5,6 @@ ViralDramaBot 打包环境专用入口点
 用于处理 PyInstaller 打包后的路径定位并启动 FastAPI 服务
 """
 
-import io
 import os
 import sys
 import multiprocessing
@@ -13,6 +12,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+import logging
 
 def setup_env():
     """配置打包运行时的环境变量和路径"""
@@ -31,21 +31,16 @@ def setup_env():
 
 def main():
     setup_env()
-    if sys.stdout is None:
-        sys.stdout = open(os.devnull, 'w')
-    else:
-        try:
-            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-        except (AttributeError, ValueError):
-            pass
+    
+    log_dir = Path(os.getenv("APPDATA")) / "ViralDramaBot"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
-    if sys.stderr is None:
-        sys.stderr = open(os.devnull, 'w')
-    else:
-        try:
-            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
-        except (AttributeError, ValueError):
-            pass
+    logging.basicConfig(
+        filename=str(log_dir / "app.log"),
+        filemode='a',
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    )
     
     # 延迟导入，确保 sys.path 已经处理完毕
     try:
