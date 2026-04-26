@@ -38,13 +38,10 @@ def get_project_root() -> Path:
     在开发环境中，使用当前脚本的路径。
     """
     if getattr(sys, 'frozen', False):
-        # 打包环境：sys.executable 是 .exe 文件路径
-        base_path = Path(sys.executable).parent
+        # PyInstaller 解压后的临时目录（包含通过 --add-data 加入的所有文件）
+        return Path(sys._MEIPASS)
     else:
-        # 开发环境：使用当前脚本所在目录
-        base_path = Path(__file__).parent
-
-    return base_path
+        return Path(__file__).parent
 
 # 获取项目根目录
 project_root = get_project_root()
@@ -55,8 +52,18 @@ sys.path.insert(0, str(project_root))
 from src.core import initialize_app, config, logger
 from src.ingestion.douyin import get_downloader
 
-# 数据目录路径（在打包环境中会创建在可执行文件旁边）
-VIDEO_METADATA_DIR = project_root / ".data" / "metadata"
+# ===== 新增：数据目录自动适配 =====
+if getattr(sys, 'frozen', False):
+    # 打包后 → 使用系统 AppData 目录（对用户不可见）
+    DATA_DIR = Path(os.getenv("APPDATA")) / "ViralDramaBot"
+else:
+    # 开发环境 → 仍然使用项目根目录下的 .data
+    DATA_DIR = project_root / ".data"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# 数据目录路径
+VIDEO_METADATA_DIR = DATA_DIR / "metadata"
 VIDEO_INDEX_DB_PATH = VIDEO_METADATA_DIR / "video_index.db"
 INDEX_REPAIR_INTERVAL_SECONDS = 300
 
@@ -67,6 +74,7 @@ INDEX_REPAIR_INTERVAL_SECONDS = 300
 # 初始化应用
 initialize_app()
 
+config.update(work_dir=str(DATA_DIR))
 # 创建 FastAPI 应用
 app = FastAPI(
     title="ViralDramaBot",
@@ -932,14 +940,32 @@ async def get_status() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
+    import multiprocessing
+    
+    multiprocessing.freeze_support()
     
     logger.info("🚀 启动 ViralDramaBot Web 服务器...")
     logger.info("📱 打开浏览器访问: http://localhost:8000")
     
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,  # 开发模式，文件改动时自动重启
-        log_level="info"
-    )
+    # 修改点：在打包环境中，不能传字符串 "app:app"，必须直接传 app 对象
+    # 同时在打包环境中，reload 必须为 False
+    is_frozen = getattr(sys, 'frozen', False)
+    
+    if is_frozen:
+        # 打包环境：直接运行对象，关闭 reload
+        uvicorn.run(
+            app, 
+            host="0.0.0.0", 
+            port=8000, 
+            log_level="info"
+        )
+    else:
+        # 开发环境：使用字符串路径，开启 reload
+        # 注意："app:app" 里的第一个 app 指的是 app.py 这个文件名
+        uvicorn.run(
+            "app:app", 
+            host="0.0.0.0", 
+            port=8000, 
+            reload=True, 
+            log_level="info"
+        )
