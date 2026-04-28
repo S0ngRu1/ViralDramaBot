@@ -21,6 +21,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,7 +53,7 @@ project_root = get_project_root()
 # 添加 src 目录到 Python 路径
 sys.path.insert(0, str(project_root))
 
-from src.ingestion.douyin import get_downloader
+from src.ingestion.douyin import get_downloader, DouyinDownloader
 
 # ===== 新增：数据目录自动适配 =====
 if getattr(sys, 'frozen', False):
@@ -132,15 +134,21 @@ async def root():
 
 class DownloadRequest(BaseModel):
     """下载请求模型"""
-    link: str
+    tasks: Optional[List[Dict[str, Optional[str]]]] = None
+    link: Optional[str] = None
+    links: Optional[List[str]] = None
     save_path: Optional[str] = None
     file_name: Optional[str] = None
+    max_concurrent: int = 3
     
     class Config:
         example = {
-            "link": "https://v.douyin.com/7PkMlgCQjjY/",
+            "tasks": [
+                {"link": "https://v.douyin.com/7PkMlgCQjjY/", "file_name": "第一条视频"},
+                {"link": "https://v.douyin.com/xxxxxxx/", "file_name": ""}
+            ],
             "save_path": ".data",
-            "file_name": "视频标题"
+            "max_concurrent": 3
         }
 
 
@@ -182,6 +190,7 @@ class BatchDeleteRequest(BaseModel):
 
 download_status: Dict[str, DownloadProgress] = {}
 repair_task: Optional[asyncio.Task] = None
+download_status_lock = Lock()
 
 
 # ============================================================================
@@ -449,7 +458,32 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
         }
     """
     try:
-        logger.info(f"📥 开始下载视频: {request.link}")
+        normalized_tasks: List[Dict[str, Optional[str]]] = []
+
+        if request.tasks:
+            for item in request.tasks:
+                if not isinstance(item, dict):
+                    continue
+                link = (item.get("link") or "").strip()
+                if not link:
+                    continue
+                file_name = (item.get("file_name") or "").strip() or None
+                normalized_tasks.append({"link": link, "file_name": file_name})
+        else:
+            raw_links: List[str] = []
+            if request.link:
+                raw_links.append(request.link)
+            if request.links:
+                raw_links.extend(request.links)
+            links = [link.strip() for link in raw_links if isinstance(link, str) and link.strip()]
+            for link in links:
+                normalized_tasks.append({"link": link, "file_name": (request.file_name or "").strip() or None})
+
+        if not normalized_tasks:
+            raise HTTPException(status_code=400, detail="请至少提供一个有效链接")
+
+        max_concurrent = max(1, min(int(request.max_concurrent or 1), 10))
+        logger.info(f"📥 开始批量下载视频: 数量={len(normalized_tasks)}, 并发={max_concurrent}")
         
         downloader = get_downloader()
         resolved_save_path = request.save_path or config.work_dir
@@ -463,70 +497,148 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
             max_retries=config.max_retries
         )
         
-        # 定义进度回调函数
-        def progress_callback(progress: Dict[str, Any]):
-            """进度回调 - 实时更新下载进度"""
-            current_progress = download_status.get("current", {})
-            download_status["current"] = build_progress(
-                status="downloading",
-                percentage=progress.get("percentage", 0),
-                downloaded=progress.get("downloaded", 0),
-                total=progress.get("total", 0),
-                message="正在下载视频文件...",
-                file_path=current_progress.get("file_path")
-            )
-        
-        # 在后台执行下载
-        def download_task():
-            try:
-                # 立即设置下载状态为进行中
+        total_count = len(normalized_tasks)
+        completed_count = 0
+        success_count = 0
+        failed_count = 0
+        active_count = 0
+        progress_by_link: Dict[str, Dict[str, int]] = {}
+        counter_lock = Lock()
+
+        def update_batch_progress(message: str, status: str = "downloading", file_path: Optional[str] = None) -> None:
+            with counter_lock:
+                aggregate_downloaded = sum(item.get("downloaded", 0) for item in progress_by_link.values())
+                aggregate_total = sum(item.get("total", 0) for item in progress_by_link.values())
+                local_completed = completed_count
+            if aggregate_total > 0:
+                percentage = min(100.0, aggregate_downloaded / aggregate_total * 100)
+            else:
+                percentage = (local_completed / total_count * 100) if total_count > 0 else 0
+            with download_status_lock:
                 download_status["current"] = build_progress(
+                    status=status,
+                    percentage=percentage,
+                    downloaded=aggregate_downloaded,
+                    total=aggregate_total,
+                    message=message,
+                    file_path=file_path or str(Path(resolved_save_path).resolve())
+                )
+        
+        # 在后台执行批量下载
+        def download_task():
+            nonlocal completed_count, success_count, failed_count, active_count
+            try:
+                update_batch_progress(
+                    message=f"正在准备批量下载任务... (0/{total_count})",
                     status="downloading",
-                    percentage=0,
-                    downloaded=0,
-                    total=0,
-                    message="正在解析视频链接并准备下载...",
                     file_path=str(Path(resolved_save_path).resolve())
                 )
-                
-                result = downloader.download_video(
-                    request.link,
-                    on_progress=progress_callback,
-                    file_name=request.file_name
-                )
-                result_file_path = result.get("file_path")
-                if result.get("status") == "success" and result_file_path:
-                    upsert_video_index_entry(
-                        video_id=result.get("video_id", Path(result_file_path).stem),
-                        file_path=result_file_path,
-                        title=Path(result_file_path).stem
+
+                def download_single(task: Dict[str, Optional[str]]) -> Dict[str, Any]:
+                    nonlocal active_count
+                    link = task.get("link") or ""
+                    file_name = task.get("file_name")
+                    with counter_lock:
+                        active_count += 1
+                        current_active = active_count
+                    update_batch_progress(
+                        message=f"正在下载中... 已完成 {completed_count}/{total_count}，进行中 {current_active}",
+                        status="downloading"
                     )
-                download_status["current"] = build_progress(
-                    status="completed",
-                    percentage=100,
-                    downloaded=0,
-                    total=0,
-                    message=f"✅ 下载完成，文件已保存到: {result_file_path or '未知路径'}",
-                    file_path=result_file_path
+
+                    def progress_callback(progress: Dict[str, Any]):
+                        with counter_lock:
+                            progress_by_link[link] = {
+                                "downloaded": progress.get("downloaded", 0),
+                                "total": progress.get("total", 0)
+                            }
+                        update_batch_progress(
+                            message=f"正在下载中... 已完成 {completed_count}/{total_count}，进行中 {active_count}",
+                            status="downloading"
+                        )
+
+                    try:
+                        isolated_downloader = DouyinDownloader()
+                        isolated_downloader.configure(
+                            download_timeout=config.download_timeout,
+                            max_retries=config.max_retries
+                        )
+                        return isolated_downloader.download_video(
+                            link,
+                            on_progress=progress_callback,
+                            file_name=file_name
+                        )
+                    finally:
+                        with counter_lock:
+                            active_count = max(0, active_count - 1)
+
+                results: List[Dict[str, Any]] = []
+                with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+                    future_map = {
+                        executor.submit(download_single, task): task
+                        for task in normalized_tasks
+                    }
+                    for future in as_completed(future_map):
+                        task = future_map[future]
+                        link = task.get("link")
+                        try:
+                            result = future.result()
+                        except Exception as e:
+                            result = {"status": "error", "message": str(e), "link": link}
+                        results.append(result)
+
+                        completed_count += 1
+                        result_file_path = result.get("file_path")
+                        if result.get("status") == "success":
+                            success_count += 1
+                            if result_file_path:
+                                upsert_video_index_entry(
+                                    video_id=result.get("video_id", Path(result_file_path).stem),
+                                    file_path=result_file_path,
+                                    title=Path(result_file_path).stem
+                                )
+                        else:
+                            failed_count += 1
+
+                        update_batch_progress(
+                            message=(
+                                f"批量下载进行中... 已完成 {completed_count}/{total_count}，"
+                                f"成功 {success_count}，失败 {failed_count}"
+                            ),
+                            status="downloading"
+                        )
+
+                status = "completed" if failed_count == 0 else "error"
+                update_batch_progress(
+                    status=status,
+                    message=(
+                        f"✅ 批量下载完成，共 {total_count} 个，成功 {success_count}，失败 {failed_count}"
+                        if status == "completed"
+                        else f"⚠️ 批量下载结束，共 {total_count} 个，成功 {success_count}，失败 {failed_count}"
+                    ),
+                    file_path=str(Path(resolved_save_path).resolve())
                 )
             except Exception as e:
                 logger.error(f"❌ 下载失败: {str(e)}")
-                current_progress = download_status.get("current", {})
-                download_status["current"] = build_progress(
-                    status="error",
-                    percentage=current_progress.get("percentage", 0),
-                    downloaded=current_progress.get("downloaded", 0),
-                    total=current_progress.get("total", 0),
-                    message=f"下载失败: {str(e)}",
-                    file_path=current_progress.get("file_path")
-                )
+                with download_status_lock:
+                    current_progress = download_status.get("current", {})
+                    download_status["current"] = build_progress(
+                        status="error",
+                        percentage=current_progress.get("percentage", 0),
+                        downloaded=current_progress.get("downloaded", 0),
+                        total=current_progress.get("total", 0),
+                        message=f"下载失败: {str(e)}",
+                        file_path=current_progress.get("file_path")
+                    )
         
         background_tasks.add_task(download_task)
         
         return {
             "status": "started",
-            "message": "视频下载任务已启动",
-            "link": request.link,
+            "message": f"批量下载任务已启动，共 {total_count} 个，并发 {max_concurrent}",
+            "tasks": normalized_tasks,
+            "total_count": total_count,
+            "max_concurrent": max_concurrent,
             "save_path": str(Path(resolved_save_path).resolve()),
             "file_name": request.file_name
         }

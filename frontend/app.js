@@ -21,12 +21,11 @@ const api = {
     /**
      * 下载视频
      */
-    downloadVideo: async (link, savePath, fileName) => {
+    downloadVideo: async (tasks, savePath) => {
         try {
             const response = await axios.post(`${API_BASE_URL}/videos/download`, {
-                link: link,
-                save_path: savePath || undefined,
-                file_name: fileName || undefined
+                tasks: tasks,
+                save_path: savePath || undefined
             });
             return response.data;
         } catch (error) {
@@ -347,39 +346,68 @@ app.component('download-page', {
                 <div class="card-title">下载视频</div>
                 
                 <div class="form-group">
-                    <label>抖音分享链接 *</label>
-                    <input 
-                        v-model="link"
-                        type="url"
-                        placeholder="输入抖音视频分享链接，如: https://v.douyin.com/7PkMlgCQjjY/"
-                        @keyup.enter="submit"
-                        @blur="hydrateVideoName(false)"
-                    />
-                </div>
-
-                <div class="form-group">
-                    <label>视频名称</label>
+                    <table class="table" style="margin-bottom: 10px;">
+                        <thead>
+                            <tr>
+                                <th style="width: 55%;">视频链接</th>
+                                <th style="width: 35%;">视频名称</th>
+                                <th style="width: 10%;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(item, idx) in downloadItems" :key="item.id">
+                                <td>
+                                    <input
+                                        v-model="item.link"
+                                        type="text"
+                                        placeholder="https://v.douyin.com/xxxxx/"
+                                    />
+                                </td>
+                                <td>
+                                    <div class="row" style="margin-bottom: 0; align-items: flex-end;">
+                                        <div class="col">
+                                            <input
+                                                v-model="item.file_name"
+                                                type="text"
+                                                placeholder="留空则自动用视频标题"
+                                                @blur="normalizeItemName(item)"
+                                            />
+                                        </div>
+                                        <div style="display: flex; align-items: end;">
+                                            <button
+                                                class="btn btn-secondary btn-small"
+                                                @click="hydrateItemName(idx)"
+                                                :disabled="isLoading || item.isParsing || !item.link.trim()"
+                                            >
+                                                <span v-if="!item.isParsing">识别</span>
+                                                <span v-else>识别中</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td style="vertical-align: bottom;">
+                                    <button
+                                        class="btn btn-secondary btn-small"
+                                        @click="removeItem(idx)"
+                                        :disabled="isLoading || downloadItems.length <= 1"
+                                        title="删除当前行"
+                                    >
+                                        ➖
+                                    </button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                     <div class="row">
-                        <div class="col">
-                            <input
-                                v-model="videoName"
-                                type="text"
-                                placeholder="可自定义保存名称，默认自动读取视频标题"
-                                @input="videoNameTouched = true"
-                                @blur="normalizeCurrentVideoName"
-                            />
-                        </div>
-                        <div style="display: flex; align-items: end;">
-                            <button
-                                class="btn btn-secondary"
-                                @click="hydrateVideoName(true)"
-                                :disabled="isLoading || isParsingInfo || !link"
-                            >
-                                <span v-if="!isParsingInfo">✨ 识别标题</span>
-                                <span v-else>识别中...</span>
-                            </button>
-                        </div>
+                        <button class="btn btn-secondary" @click="addItem" :disabled="isLoading">➕ 添加一行</button>
+                        <button class="btn btn-secondary" @click="hydrateAllItemNames" :disabled="isLoading || validItems.length === 0 || isBatchParsing">
+                            <span v-if="!isBatchParsing">✨ 全部自动识别</span>
+                            <span v-else>识别中...</span>
+                        </button>
                     </div>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        当前有效链接 {{ validItems.length }} 个
+                    </p>
                 </div>
 
                 <div class="form-group">
@@ -410,7 +438,7 @@ app.component('download-page', {
                     <button 
                         class="btn btn-primary btn-block"
                         @click="submit"
-                        :disabled="!link || isLoading"
+                        :disabled="validItems.length === 0 || isLoading"
                     >
                         <span v-if="!isLoading">🚀 开始下载</span>
                         <span v-else>
@@ -427,11 +455,11 @@ app.component('download-page', {
                 <div class="progress">
                     <div 
                         class="progress-bar"
-                        :style="{ width: progress.percentage + '%' }"
+                        :style="{ width: realtimePercentage + '%' }"
                     ></div>
                 </div>
                 <div class="progress-text">
-                    {{ progress.percentage.toFixed(1) }}% - {{ formatBytes(progress.downloaded) }} / {{ formatBytes(progress.total) }}
+                    {{ realtimePercentage.toFixed(1) }}% - {{ formatBytes(progress.downloaded) }} / {{ formatBytes(progress.total) }}
                 </div>
                 <p class="mt-2"><strong>保存路径：</strong>{{ progress.file_path || savePath || settings.video_dir }}</p>
                 <p class="mt-2" :class="{'text-success': progress.status === 'completed', 'text-danger': progress.status === 'error'}">
@@ -452,14 +480,18 @@ app.component('download-page', {
     `,
 
     setup(props, { emit }) {
-        const link = ref('');
-        const videoName = ref('');
+        const createEmptyItem = () => ({
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            link: '',
+            file_name: '',
+            isParsing: false
+        });
+        const downloadItems = ref([createEmptyItem()]);
         const savePath = ref(localStorage.getItem(DOWNLOAD_SAVE_PATH_KEY) || props.settings.video_dir || '.data');
         const isLoading = ref(false);
         const isBrowsing = ref(false);
-        const isParsingInfo = ref(false);
+        const isBatchParsing = ref(false);
         const currentTaskStarted = ref(false);
-        const videoNameTouched = ref(false);
         const progress = ref({
             status: 'idle',
             percentage: 0,
@@ -471,6 +503,22 @@ app.component('download-page', {
 
         // 定时更新进度
         let progressInterval = null;
+        const validItems = computed(() =>
+            downloadItems.value
+                .map(item => ({
+                    link: (item.link || '').trim(),
+                    file_name: (item.file_name || '').trim()
+                }))
+                .filter(item => item.link)
+        );
+        const realtimePercentage = computed(() => {
+            const downloaded = Number(progress.value.downloaded || 0);
+            const total = Number(progress.value.total || 0);
+            if (total > 0) {
+                return Math.min(100, (downloaded / total) * 100);
+            }
+            return Number(progress.value.percentage || 0);
+        });
 
         const stopProgressPolling = () => {
             if (progressInterval) {
@@ -482,11 +530,16 @@ app.component('download-page', {
         const fetchProgress = async () => {
             try {
                 const result = await props.api.getDownloadProgress();
+                const downloaded = Number(result.downloaded || 0);
+                const total = Number(result.total || 0);
+                const computedPercentage = total > 0
+                    ? Math.min(100, (downloaded / total) * 100)
+                    : Number(result.percentage || 0);
                 progress.value = {
                     status: result.status || 'idle',
-                    percentage: result.percentage || 0,
-                    downloaded: result.downloaded || 0,
-                    total: result.total || 0,
+                    percentage: computedPercentage,
+                    downloaded: downloaded,
+                    total: total,
                     message: result.message || '就绪',
                     file_path: result.file_path || savePath.value || props.settings.video_dir
                 };
@@ -542,31 +595,52 @@ app.component('download-page', {
             return parts.slice(0, 2).join('');
         };
 
-        const normalizeCurrentVideoName = () => {
-            videoName.value = normalizeVideoName(videoName.value);
+        const normalizeItemName = (item) => {
+            item.file_name = normalizeVideoName(item.file_name);
         };
 
-        const hydrateVideoName = async (force = false) => {
-            if (!link.value || isParsingInfo.value) return;
-            if (!force && videoNameTouched.value && videoName.value) return;
+        const hydrateItemName = async (idx) => {
+            const item = downloadItems.value[idx];
+            const targetLink = (item?.link || '').trim();
+            if (!item || item.isParsing || !targetLink) return;
 
-            isParsingInfo.value = true;
+            item.isParsing = true;
             try {
-                const result = await props.api.parseVideoInfo(link.value);
+                const result = await props.api.parseVideoInfo(targetLink);
                 const suggestedName = result.title || result.description || result.video_id || '';
-                if (suggestedName && (!videoNameTouched.value || !videoName.value || force === true)) {
-                    videoName.value = normalizeVideoName(suggestedName);
-                    videoNameTouched.value = false;
+                if (suggestedName && !item.file_name) {
+                    item.file_name = normalizeVideoName(suggestedName);
                 }
             } catch (error) {
                 console.error('解析视频信息失败', error);
             } finally {
-                isParsingInfo.value = false;
+                item.isParsing = false;
             }
         };
 
+        const hydrateAllItemNames = async () => {
+            if (isBatchParsing.value) return;
+            isBatchParsing.value = true;
+            try {
+                for (let i = 0; i < downloadItems.value.length; i += 1) {
+                    await hydrateItemName(i);
+                }
+            } finally {
+                isBatchParsing.value = false;
+            }
+        };
+
+        const addItem = () => {
+            downloadItems.value.push(createEmptyItem());
+        };
+
+        const removeItem = (idx) => {
+            if (downloadItems.value.length <= 1) return;
+            downloadItems.value.splice(idx, 1);
+        };
+
         const submit = async () => {
-            if (!link.value) return;
+            if (validItems.value.length === 0) return;
 
             isLoading.value = true;
             currentTaskStarted.value = true;
@@ -580,21 +654,21 @@ app.component('download-page', {
             };
 
             try {
-                normalizeCurrentVideoName();
                 await startProgressPolling();
+                const payloadTasks = validItems.value.map(item => ({
+                    link: item.link,
+                    file_name: item.file_name || undefined
+                }));
                 const result = await props.api.downloadVideo(
-                    link.value,
-                    savePath.value,
-                    videoName.value
+                    payloadTasks,
+                    savePath.value
                 );
                 progress.value = {
                     ...progress.value,
                     file_path: result.save_path || progress.value.file_path,
-                    message: `下载任务已启动，目标目录: ${result.save_path || savePath.value}`
+                    message: `已启动 ${result.total_count || payloadTasks.length} 个任务`
                 };
-                link.value = '';
-                videoName.value = '';
-                videoNameTouched.value = false;
+                downloadItems.value = [createEmptyItem()];
             } catch (error) {
                 stopProgressPolling();
                 isLoading.value = false;
@@ -638,18 +712,21 @@ app.component('download-page', {
         });
 
         return {
-            link,
-            videoName,
+            downloadItems,
+            validItems,
             savePath,
             isLoading,
             isBrowsing,
-            isParsingInfo,
+            isBatchParsing,
             progress,
+            realtimePercentage,
             submit,
             browseSavePath,
-            hydrateVideoName,
-            normalizeCurrentVideoName,
-            videoNameTouched,
+            hydrateItemName,
+            hydrateAllItemNames,
+            normalizeItemName,
+            addItem,
+            removeItem,
             formatBytes
         };
     }
