@@ -16,6 +16,7 @@ const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch } 
 
 const API_BASE_URL = "http://localhost:8000/api";
 const DOWNLOAD_SAVE_PATH_KEY = "viraldramabot.download.savePath";
+const MAX_BATCH_ITEMS = 50;
 
 const api = {
     /**
@@ -349,9 +350,9 @@ app.component('download-page', {
                     <table class="table" style="margin-bottom: 10px;">
                         <thead>
                             <tr>
-                                <th style="width: 55%;">视频链接</th>
-                                <th style="width: 35%;">视频名称</th>
-                                <th style="width: 10%;">操作</th>
+                                <th style="width: 58%;">视频链接</th>
+                                <th style="width: 36%;">视频名称</th>
+                                <th style="width: 6%;">操作</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -364,8 +365,8 @@ app.component('download-page', {
                                     />
                                 </td>
                                 <td>
-                                    <div class="row" style="margin-bottom: 0; align-items: flex-end;">
-                                        <div class="col">
+                                    <div class="row" style="margin-bottom: 0; align-items: flex-end; gap: 8px; flex-wrap: nowrap;">
+                                        <div style="flex: 1; min-width: 0;">
                                             <input
                                                 v-model="item.file_name"
                                                 type="text"
@@ -375,7 +376,7 @@ app.component('download-page', {
                                         </div>
                                         <div style="display: flex; align-items: end;">
                                             <button
-                                                class="btn btn-secondary btn-small"
+                                                class="btn btn-secondary btn-small task-action-btn"
                                                 @click="hydrateItemName(idx)"
                                                 :disabled="isLoading || item.isParsing || !item.link.trim()"
                                             >
@@ -385,28 +386,28 @@ app.component('download-page', {
                                         </div>
                                     </div>
                                 </td>
-                                <td style="vertical-align: bottom;">
+                                <td style="vertical-align: bottom; text-align: left; padding-left: 6px; padding-right: 6px;">
                                     <button
-                                        class="btn btn-secondary btn-small"
+                                        class="btn btn-secondary btn-small task-action-btn"
                                         @click="removeItem(idx)"
                                         :disabled="isLoading || downloadItems.length <= 1"
                                         title="删除当前行"
                                     >
-                                        ➖
+                                        删除
                                     </button>
                                 </td>
                             </tr>
                         </tbody>
                     </table>
                     <div class="row">
-                        <button class="btn btn-secondary" @click="addItem" :disabled="isLoading">➕ 添加一行</button>
+                        <button class="btn btn-secondary" @click="addItem" :disabled="isLoading || downloadItems.length >= MAX_BATCH_ITEMS">➕ 添加一行</button>
                         <button class="btn btn-secondary" @click="hydrateAllItemNames" :disabled="isLoading || validItems.length === 0 || isBatchParsing">
                             <span v-if="!isBatchParsing">✨ 全部自动识别</span>
                             <span v-else>识别中...</span>
                         </button>
                     </div>
                     <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
-                        当前有效链接 {{ validItems.length }} 个
+                        当前有效链接 {{ validItems.length }} / {{ MAX_BATCH_ITEMS }} 个
                     </p>
                 </div>
 
@@ -631,6 +632,7 @@ app.component('download-page', {
         };
 
         const addItem = () => {
+            if (downloadItems.value.length >= MAX_BATCH_ITEMS) return;
             downloadItems.value.push(createEmptyItem());
         };
 
@@ -641,6 +643,10 @@ app.component('download-page', {
 
         const submit = async () => {
             if (validItems.value.length === 0) return;
+            if (validItems.value.length > MAX_BATCH_ITEMS) {
+                alert(`单次最多支持 ${MAX_BATCH_ITEMS} 条下载任务`);
+                return;
+            }
 
             isLoading.value = true;
             currentTaskStarted.value = true;
@@ -727,6 +733,7 @@ app.component('download-page', {
             normalizeItemName,
             addItem,
             removeItem,
+            MAX_BATCH_ITEMS,
             formatBytes
         };
     }

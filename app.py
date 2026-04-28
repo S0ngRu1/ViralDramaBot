@@ -69,6 +69,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 VIDEO_METADATA_DIR = DATA_DIR / "metadata"
 VIDEO_INDEX_DB_PATH = VIDEO_METADATA_DIR / "video_index.db"
 INDEX_REPAIR_INTERVAL_SECONDS = 300
+MAX_TASKS_PER_BATCH = 50
+DEFAULT_MAX_CONCURRENT = 6
 
 # ============================================================================
 # 初始化
@@ -139,7 +141,7 @@ class DownloadRequest(BaseModel):
     links: Optional[List[str]] = None
     save_path: Optional[str] = None
     file_name: Optional[str] = None
-    max_concurrent: int = 3
+    max_concurrent: int = DEFAULT_MAX_CONCURRENT
     
     class Config:
         example = {
@@ -148,7 +150,7 @@ class DownloadRequest(BaseModel):
                 {"link": "https://v.douyin.com/xxxxxxx/", "file_name": ""}
             ],
             "save_path": ".data",
-            "max_concurrent": 3
+            "max_concurrent": DEFAULT_MAX_CONCURRENT
         }
 
 
@@ -481,8 +483,13 @@ async def download_video(request: DownloadRequest, background_tasks: BackgroundT
 
         if not normalized_tasks:
             raise HTTPException(status_code=400, detail="请至少提供一个有效链接")
+        if len(normalized_tasks) > MAX_TASKS_PER_BATCH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"单次最多支持 {MAX_TASKS_PER_BATCH} 条下载任务"
+            )
 
-        max_concurrent = max(1, min(int(request.max_concurrent or 1), 10))
+        max_concurrent = max(1, min(int(request.max_concurrent or DEFAULT_MAX_CONCURRENT), 10))
         logger.info(f"📥 开始批量下载视频: 数量={len(normalized_tasks)}, 并发={max_concurrent}")
         
         downloader = get_downloader()
