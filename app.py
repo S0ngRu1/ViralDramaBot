@@ -56,6 +56,15 @@ project_root = get_project_root()
 sys.path.insert(0, str(project_root))
 
 from src.ingestion.douyin import get_downloader, DouyinDownloader
+from src.publishing.weixin.dao import WeixinDAO
+from src.publishing.weixin.account_manager import AccountManager
+from src.publishing.weixin.uploader import Uploader
+from src.publishing.weixin.scheduler import UploadScheduler
+from src.publishing.weixin.schemas import (
+    AccountCreate, AccountStatus, TaskStatus,
+    UploadTaskCreate, BatchUploadCreate, ScheduleCreate,
+    MetadataSource,
+)
 
 # ===== 新增：数据目录自动适配 =====
 if getattr(sys, 'frozen', False):
@@ -91,6 +100,8 @@ async def lifespan(app):
     repair_missing_video_entries()
     if repair_task is None or repair_task.done():
         repair_task = asyncio.create_task(periodic_index_repair())
+    # 启动视频号定时调度器
+    weixin_scheduler.start()
     yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
@@ -98,6 +109,8 @@ async def lifespan(app):
             await repair_task
         except asyncio.CancelledError:
             pass
+    # 停止视频号调度器
+    weixin_scheduler.stop()
 
 app = FastAPI(
     title="ViralDramaBot",
@@ -195,6 +208,12 @@ class BatchDeleteRequest(BaseModel):
 download_status: Dict[str, DownloadProgress] = {}
 repair_task: Optional[asyncio.Task] = None
 download_status_lock = Lock()
+
+# 视频号模块初始化
+weixin_dao = WeixinDAO()
+weixin_account_mgr = AccountManager(weixin_dao)
+weixin_uploader = Uploader(weixin_dao)
+weixin_scheduler = UploadScheduler(weixin_dao)
 
 
 # ============================================================================
@@ -1023,6 +1042,315 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
             status_code=400,
             detail=f"更新设置失败: {str(e)}"
         )
+
+
+# ============================================================================
+# 视频号上传 API
+# ============================================================================
+
+# ---- 账号管理 ----
+
+@app.post("/api/weixin/accounts")
+async def weixin_create_account(request: AccountCreate) -> Dict[str, Any]:
+    """创建视频号账号"""
+    try:
+        account = weixin_account_mgr.create_account(request.name)
+        return {"status": "success", "account": account}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"创建账号失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/accounts")
+async def weixin_get_accounts() -> Dict[str, Any]:
+    """获取所有视频号账号"""
+    try:
+        accounts = weixin_account_mgr.get_all_accounts()
+        return {"status": "success", "accounts": accounts, "total": len(accounts)}
+    except Exception as e:
+        logger.error(f"获取账号列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/accounts/{account_id}/login")
+async def weixin_login_account(account_id: int, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """触发扫码登录"""
+    account = weixin_account_mgr.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    def do_login():
+        weixin_account_mgr.login_with_qrcode(account_id)
+
+    background_tasks.add_task(do_login)
+    return {"status": "started", "message": "扫码登录已启动，请在弹出的浏览器窗口中扫码"}
+
+
+@app.post("/api/weixin/accounts/{account_id}/refresh")
+async def weixin_refresh_account(account_id: int) -> Dict[str, Any]:
+    """刷新账号登录状态"""
+    try:
+        result = weixin_account_mgr.refresh_login(account_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"刷新登录失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/weixin/accounts/{account_id}")
+async def weixin_delete_account(account_id: int) -> Dict[str, Any]:
+    """删除账号"""
+    try:
+        success = weixin_account_mgr.delete_account(account_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        return {"status": "success", "message": "账号已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除账号失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- 上传任务 ----
+
+@app.post("/api/weixin/upload")
+async def weixin_create_upload_task(request: UploadTaskCreate, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """创建单个上传任务"""
+    try:
+        account = weixin_dao.get_account(request.account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        task_id = weixin_dao.create_task(
+            account_id=request.account_id,
+            video_path=request.video_path,
+            title=request.title,
+            description=request.description,
+            tags=request.tags,
+            metadata_source=request.metadata_source.value,
+            scheduled_at=request.scheduled_at.isoformat() if request.scheduled_at else None,
+        )
+
+        if request.scheduled_at:
+            # 定时任务
+            weixin_scheduler.add_one_time_task(
+                task_id=task_id,
+                account_id=request.account_id,
+                video_path=request.video_path,
+                scheduled_at=request.scheduled_at,
+                title=request.title,
+                description=request.description,
+                tags=request.tags,
+                metadata_source=request.metadata_source.value,
+            )
+            return {"status": "scheduled", "task_id": task_id, "scheduled_at": str(request.scheduled_at)}
+        else:
+            # 立即执行
+            def do_upload():
+                weixin_uploader.upload_video(
+                    task_id=task_id,
+                    account_id=request.account_id,
+                    video_path=request.video_path,
+                    title=request.title,
+                    description=request.description,
+                    tags=request.tags,
+                    metadata_source=request.metadata_source.value,
+                )
+
+            background_tasks.add_task(do_upload)
+            return {"status": "started", "task_id": task_id, "message": "上传任务已创建"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建上传任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/upload/batch")
+async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """批量创建上传任务"""
+    try:
+        account = weixin_dao.get_account(request.account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        task_ids = []
+        for i, video_path in enumerate(request.video_paths):
+            title = request.titles[i] if request.titles and i < len(request.titles) else None
+            desc = request.descriptions[i] if request.descriptions and i < len(request.descriptions) else None
+
+            task_id = weixin_dao.create_task(
+                account_id=request.account_id,
+                video_path=video_path,
+                title=title,
+                description=desc,
+                tags=request.tags,
+                metadata_source=request.metadata_source.value,
+            )
+            task_ids.append(task_id)
+
+        # 批量上传在后台依次执行
+        def do_batch_upload():
+            for task_id in task_ids:
+                task = weixin_dao.get_task(task_id)
+                if task:
+                    weixin_uploader.upload_video(
+                        task_id=task_id,
+                        account_id=request.account_id,
+                        video_path=task["video_path"],
+                        title=task.get("title"),
+                        description=task.get("description"),
+                        tags=task.get("tags"),
+                        metadata_source=request.metadata_source.value,
+                    )
+
+        background_tasks.add_task(do_batch_upload)
+        return {"status": "started", "task_ids": task_ids, "total": len(task_ids)}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量创建任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/tasks")
+async def weixin_get_tasks(
+    account_id: Optional[int] = None,
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    """获取上传任务列表"""
+    try:
+        task_status = TaskStatus(status) if status else None
+        tasks = weixin_dao.get_tasks(account_id=account_id, status=task_status)
+        return {"status": "success", "tasks": tasks, "total": len(tasks)}
+    except Exception as e:
+        logger.error(f"获取任务列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/weixin/tasks/{task_id}")
+async def weixin_delete_task(task_id: int) -> Dict[str, Any]:
+    """删除上传任务"""
+    try:
+        success = weixin_dao.delete_task(task_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {"status": "success", "message": "任务已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/tasks/{task_id}/retry")
+async def weixin_retry_task(task_id: int, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """重试失败任务"""
+    try:
+        task = weixin_dao.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        if task["status"] != TaskStatus.FAILED.value:
+            raise HTTPException(status_code=400, detail="只能重试失败的任务")
+
+        retry_count = weixin_dao.increment_retry(task_id)
+        if retry_count > weixin_dao.get_task(task_id).get("retry_count", 3):
+            raise HTTPException(status_code=400, detail="已达到最大重试次数")
+
+        def do_retry():
+            weixin_uploader.upload_video(
+                task_id=task_id,
+                account_id=task["account_id"],
+                video_path=task["video_path"],
+                title=task.get("title"),
+                description=task.get("description"),
+                tags=task.get("tags"),
+                metadata_source=task.get("metadata_source", "manual"),
+            )
+
+        background_tasks.add_task(do_retry)
+        return {"status": "started", "message": "重试任务已启动"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"重试任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- 定时计划 ----
+
+@app.post("/api/weixin/schedule")
+async def weixin_create_schedule(request: ScheduleCreate) -> Dict[str, Any]:
+    """创建定时计划"""
+    try:
+        account = weixin_dao.get_account(request.account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="账号不存在")
+
+        schedule_id = weixin_dao.create_schedule(
+            account_id=request.account_id,
+            video_paths=request.video_paths,
+            cron_expr=request.cron_expr,
+            interval_minutes=request.interval_minutes,
+            titles=request.titles,
+            descriptions=request.descriptions,
+            tags=request.tags,
+            metadata_source=request.metadata_source.value,
+        )
+
+        job_id = weixin_scheduler.add_schedule(
+            schedule_id=schedule_id,
+            account_id=request.account_id,
+            video_paths=request.video_paths,
+            cron_expr=request.cron_expr,
+            interval_minutes=request.interval_minutes,
+            titles=request.titles,
+            descriptions=request.descriptions,
+            tags=request.tags,
+            metadata_source=request.metadata_source.value,
+        )
+
+        return {"status": "success", "schedule_id": schedule_id, "job_id": job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"创建定时计划失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/schedule")
+async def weixin_get_schedules() -> Dict[str, Any]:
+    """获取定时计划列表"""
+    try:
+        schedules = weixin_dao.get_active_schedules()
+        jobs = weixin_scheduler.get_jobs()
+        return {"status": "success", "schedules": schedules, "jobs": jobs}
+    except Exception as e:
+        logger.error(f"获取定时计划失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/weixin/schedule/{schedule_id}")
+async def weixin_delete_schedule(schedule_id: int) -> Dict[str, Any]:
+    """删除定时计划"""
+    try:
+        weixin_scheduler.remove_job(f"weixin_schedule_{schedule_id}")
+        success = weixin_dao.delete_schedule(schedule_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="定时计划不存在")
+        return {"status": "success", "message": "定时计划已删除"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除定时计划失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---- 系统信息 ----

@@ -171,6 +171,127 @@ const api = {
         } catch (error) {
             throw error.response?.data || error.message;
         }
+    },
+
+    // ========================================================================
+    // 微信视频号 API
+    // ========================================================================
+
+    getWeixinAccounts: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/accounts`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinAccount: async (name) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts`, { name });
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    loginWeixinAccount: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/${id}/login`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    refreshWeixinAccount: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/${id}/refresh`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinAccount: async (id) => {
+        try {
+            const response = await axios.delete(`${API_BASE_URL}/weixin/accounts/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    getWeixinTasks: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/tasks`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinUpload: async (payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/upload`, payload);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinBatchUpload: async (payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/upload/batch`, payload);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    retryWeixinTask: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/tasks/${id}/retry`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinTask: async (id) => {
+        try {
+            const response = await axios.delete(`${API_BASE_URL}/weixin/tasks/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    getWeixinSchedules: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/schedule`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinSchedule: async (payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/schedule`, payload);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinSchedule: async (id) => {
+        try {
+            const response = await axios.delete(`${API_BASE_URL}/weixin/schedule/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
     }
 };
 
@@ -204,11 +325,19 @@ const app = createApp({
                         </a>
                     </li>
                     <li>
-                        <a 
+                        <a
                             :class="{ active: currentPage === 'settings' }"
                             @click="currentPage = 'settings'"
                         >
                             ⚙️ 应用设置
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            :class="{ active: currentPage === 'weixin' }"
+                            @click="currentPage = 'weixin'"
+                        >
+                            📤 视频号上传
                         </a>
                     </li>
                 </ul>
@@ -236,11 +365,16 @@ const app = createApp({
 
                 <!-- 设置页面 -->
                 <div v-if="currentPage === 'settings'">
-                    <settings-page 
+                    <settings-page
                         :api="api"
                         :settings="settings"
                         @save="handleSaveSettings"
                     />
+                </div>
+
+                <!-- 微信视频号上传页面 -->
+                <div v-if="currentPage === 'weixin'">
+                    <weixin-page :api="api" />
                 </div>
             </div>
         </div>
@@ -1125,6 +1259,552 @@ app.component('settings-page', {
             isBrowsing,
             browseVideoDir,
             save
+        };
+    }
+});
+
+// ============================================================================
+// 微信视频号上传页面组件
+// ============================================================================
+
+app.component('weixin-page', {
+    props: ['api'],
+    template: `
+        <div>
+            <div class="header">
+                <h1>📤 视频号上传管理</h1>
+                <p>管理视频号账号、上传视频、设置定时发布</p>
+            </div>
+
+            <!-- 消息提示 -->
+            <div v-if="message.show" :class="['alert', 'alert-' + message.type]">
+                {{ message.text }}
+            </div>
+
+            <!-- 标签页 -->
+            <div class="tabs">
+                <div :class="['tab', { active: tab === 'accounts' }]" @click="tab = 'accounts'">账号管理</div>
+                <div :class="['tab', { active: tab === 'upload' }]" @click="tab = 'upload'">上传视频</div>
+                <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
+                <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
+            </div>
+
+            <!-- 账号管理 -->
+            <div v-if="tab === 'accounts'">
+                <div class="card">
+                    <div class="flex-between" style="margin-bottom: 16px;">
+                        <div class="card-title" style="margin-bottom: 0;">视频号账号</div>
+                        <button class="btn btn-primary btn-small" @click="showAddAccount = true">+ 添加账号</button>
+                    </div>
+                    <table class="table" v-if="accounts.length">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>名称</th>
+                                <th>微信ID</th>
+                                <th>状态</th>
+                                <th>创建时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="acc in accounts" :key="acc.id">
+                                <td>{{ acc.id }}</td>
+                                <td>{{ acc.name }}</td>
+                                <td>{{ acc.wechat_id || '-' }}</td>
+                                <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
+                                <td>{{ formatDate(acc.created_at) }}</td>
+                                <td>
+                                    <div class="action-group">
+                                        <button class="btn btn-primary btn-small" @click="loginAccount(acc.id)" :disabled="acc.status === 'logging_in'">
+                                            {{ acc.status === 'logging_in' ? '扫码中...' : '扫码登录' }}
+                                        </button>
+                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)">刷新</button>
+                                        <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty-state">暂无账号，点击"添加账号"开始</div>
+                </div>
+            </div>
+
+            <!-- 上传视频 -->
+            <div v-if="tab === 'upload'">
+                <div class="card">
+                    <div class="card-title">上传视频</div>
+                    <div class="form-group">
+                        <label>选择账号</label>
+                        <select v-model="uploadForm.account_id">
+                            <option value="">请选择账号</option>
+                            <option v-for="acc in accounts.filter(a => a.status === 'active')" :key="acc.id" :value="acc.id">
+                                {{ acc.name }}
+                            </option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>视频文件路径</label>
+                        <input v-model="uploadForm.video_path" type="text" placeholder="输入视频文件的完整路径，如 C:\\Videos\\test.mp4">
+                    </div>
+                    <div class="form-group">
+                        <label>元数据来源</label>
+                        <select v-model="uploadForm.metadata_source">
+                            <option value="manual">手动填写</option>
+                            <option value="filename">从文件名读取</option>
+                            <option value="directory">从目录名读取</option>
+                            <option value="ai">AI 自动生成</option>
+                        </select>
+                    </div>
+                    <div v-if="uploadForm.metadata_source === 'manual'">
+                        <div class="form-group">
+                            <label>标题</label>
+                            <input v-model="uploadForm.title" type="text" placeholder="视频标题（最多50字）" maxlength="50">
+                        </div>
+                        <div class="form-group">
+                            <label>描述</label>
+                            <textarea v-model="uploadForm.description" placeholder="视频描述"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>标签（用逗号分隔）</label>
+                            <input v-model="uploadForm.tagsStr" type="text" placeholder="标签1, 标签2, 标签3">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>定时发布（可选）</label>
+                        <input type="datetime-local" v-model="uploadForm.scheduled_at">
+                    </div>
+                    <button class="btn btn-success btn-block" @click="createUploadTask" :disabled="!uploadForm.account_id || !uploadForm.video_path">
+                        {{ uploadForm.scheduled_at ? '定时上传' : '立即上传' }}
+                    </button>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">批量上传</div>
+                    <div class="form-group">
+                        <label>选择账号</label>
+                        <select v-model="batchForm.account_id">
+                            <option value="">请选择账号</option>
+                            <option v-for="acc in accounts.filter(a => a.status === 'active')" :key="acc.id" :value="acc.id">
+                                {{ acc.name }}
+                            </option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>视频文件路径（每行一个）</label>
+                        <textarea v-model="batchForm.video_paths" rows="5" placeholder="C:\\Videos\\video1.mp4&#10;C:\\Videos\\video2.mp4&#10;C:\\Videos\\video3.mp4"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>标签（所有视频共用，用逗号分隔）</label>
+                        <input v-model="batchForm.tagsStr" type="text" placeholder="标签1, 标签2">
+                    </div>
+                    <div class="form-group">
+                        <label>元数据来源</label>
+                        <select v-model="batchForm.metadata_source">
+                            <option value="manual">手动填写</option>
+                            <option value="filename">从文件名读取</option>
+                            <option value="directory">从目录名读取</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!batchForm.account_id || !batchForm.video_paths">
+                        批量上传
+                    </button>
+                </div>
+            </div>
+
+            <!-- 任务列表 -->
+            <div v-if="tab === 'tasks'">
+                <div class="card">
+                    <div class="flex-between" style="margin-bottom: 16px;">
+                        <div class="card-title" style="margin-bottom: 0;">上传任务</div>
+                        <button class="btn btn-secondary btn-small" @click="loadTasks()">刷新</button>
+                    </div>
+                    <table class="table" v-if="tasks.length">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>账号</th>
+                                <th>视频</th>
+                                <th>标题</th>
+                                <th>状态</th>
+                                <th>创建时间</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="task in tasks" :key="task.id">
+                                <td>{{ task.id }}</td>
+                                <td>{{ getAccountName(task.account_id) }}</td>
+                                <td>{{ getFileName(task.video_path) }}</td>
+                                <td>{{ task.title || '-' }}</td>
+                                <td><span :class="'badge badge-' + getTaskStatusClass(task.status)">{{ getTaskStatusText(task.status) }}</span></td>
+                                <td>{{ formatDate(task.created_at) }}</td>
+                                <td>
+                                    <div class="action-group">
+                                        <button v-if="task.status === 'failed'" class="btn btn-primary btn-small" @click="retryTask(task.id)">重试</button>
+                                        <button class="btn btn-danger btn-small" @click="deleteTask(task.id)">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty-state">暂无上传任务</div>
+                </div>
+            </div>
+
+            <!-- 定时发布 -->
+            <div v-if="tab === 'schedule'">
+                <div class="card">
+                    <div class="card-title">创建定时计划</div>
+                    <div class="form-group">
+                        <label>选择账号</label>
+                        <select v-model="scheduleForm.account_id">
+                            <option value="">请选择账号</option>
+                            <option v-for="acc in accounts.filter(a => a.status === 'active')" :key="acc.id" :value="acc.id">
+                                {{ acc.name }}
+                            </option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>视频文件路径（每行一个）</label>
+                        <textarea v-model="scheduleForm.video_paths" rows="5" placeholder="C:\\Videos\\video1.mp4&#10;C:\\Videos\\video2.mp4"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>调度方式</label>
+                        <select v-model="scheduleForm.schedule_type">
+                            <option value="interval">按间隔</option>
+                            <option value="cron">Cron 表达式</option>
+                        </select>
+                    </div>
+                    <div v-if="scheduleForm.schedule_type === 'interval'" class="form-group">
+                        <label>间隔（分钟）</label>
+                        <input type="number" v-model.number="scheduleForm.interval_minutes" min="1" placeholder="60">
+                    </div>
+                    <div v-if="scheduleForm.schedule_type === 'cron'" class="form-group">
+                        <label>Cron 表达式</label>
+                        <input v-model="scheduleForm.cron_expr" type="text" placeholder="0 9 * * * (每天9点)">
+                    </div>
+                    <div class="form-group">
+                        <label>标签（用逗号分隔）</label>
+                        <input v-model="scheduleForm.tagsStr" type="text" placeholder="标签1, 标签2">
+                    </div>
+                    <button class="btn btn-success btn-block" @click="createSchedule" :disabled="!scheduleForm.account_id || !scheduleForm.video_paths">
+                        创建定时计划
+                    </button>
+                </div>
+
+                <div class="card">
+                    <div class="flex-between" style="margin-bottom: 16px;">
+                        <div class="card-title" style="margin-bottom: 0;">定时计划列表</div>
+                        <button class="btn btn-secondary btn-small" @click="loadSchedules()">刷新</button>
+                    </div>
+                    <table class="table" v-if="schedules.length">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>账号</th>
+                                <th>视频数</th>
+                                <th>调度</th>
+                                <th>下次执行</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="s in schedules" :key="s.id">
+                                <td>{{ s.id }}</td>
+                                <td>{{ getAccountName(s.account_id) }}</td>
+                                <td>{{ s.video_paths ? s.video_paths.length : 0 }}</td>
+                                <td>{{ s.cron_expr || '每 ' + s.interval_minutes + ' 分钟' }}</td>
+                                <td>{{ s.next_run_at || '-' }}</td>
+                                <td>
+                                    <button class="btn btn-danger btn-small" @click="deleteSchedule(s.id)">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty-state">暂无定时计划</div>
+                </div>
+            </div>
+
+            <!-- 添加账号弹窗 -->
+            <div v-if="showAddAccount" class="modal-overlay" @click.self="showAddAccount = false">
+                <div class="modal-box">
+                    <h3>添加视频号账号</h3>
+                    <div class="form-group">
+                        <label>账号名称</label>
+                        <input v-model="newAccountName" type="text" placeholder="给账号起个名字，如：我的视频号1">
+                    </div>
+                    <p class="text-muted" style="font-size: 13px; margin-top: 8px;">
+                        创建后需要扫码登录才能使用。每个账号需要在微信中扫码确认。
+                    </p>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" @click="showAddAccount = false">取消</button>
+                        <button class="btn btn-primary" @click="addAccount" :disabled="!newAccountName">创建并登录</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `,
+
+    setup(props) {
+        const tab = ref('accounts');
+        const accounts = ref([]);
+        const tasks = ref([]);
+        const schedules = ref([]);
+        const showAddAccount = ref(false);
+        const newAccountName = ref('');
+        const message = reactive({ show: false, type: 'info', text: '' });
+
+        const uploadForm = reactive({
+            account_id: '', video_path: '', title: '', description: '',
+            tagsStr: '', metadata_source: 'manual', scheduled_at: ''
+        });
+        const batchForm = reactive({
+            account_id: '', video_paths: '', tagsStr: '', metadata_source: 'manual'
+        });
+        const scheduleForm = reactive({
+            account_id: '', video_paths: '', schedule_type: 'interval',
+            interval_minutes: 60, cron_expr: '', tagsStr: '', metadata_source: 'manual'
+        });
+
+        function showMessage(text, type = 'info') {
+            message.show = true;
+            message.type = type;
+            message.text = text;
+            setTimeout(() => message.show = false, 3000);
+        }
+
+        function formatDate(s) {
+            if (!s) return '-';
+            return new Date(s).toLocaleString('zh-CN');
+        }
+
+        function getFileName(p) {
+            return p ? p.split(/[/\\\\]/).pop() : '-';
+        }
+
+        function getAccountName(id) {
+            const a = accounts.value.find(a => a.id === id);
+            return a ? a.name : '#' + id;
+        }
+
+        function getStatusClass(s) {
+            return { active: 'active', expired: 'expired', error: 'error', logging_in: 'pending' }[s] || '';
+        }
+
+        function getStatusText(s) {
+            return { active: '正常', expired: '已过期', error: '异常', logging_in: '扫码中' }[s] || s;
+        }
+
+        function getTaskStatusClass(s) {
+            return { pending: 'pending', uploading: 'uploading', completed: 'completed', failed: 'failed' }[s] || '';
+        }
+
+        function getTaskStatusText(s) {
+            return {
+                pending: '等待中', uploading: '上传中', processing: '处理中',
+                filling: '填写中', publishing: '发布中', completed: '已完成',
+                failed: '失败', cancelled: '已取消'
+            }[s] || s;
+        }
+
+        async function loadAccounts() {
+            try {
+                const res = await props.api.getWeixinAccounts();
+                accounts.value = res.accounts || [];
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadTasks() {
+            try {
+                const res = await props.api.getWeixinTasks();
+                tasks.value = res.tasks || [];
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadSchedules() {
+            try {
+                const res = await props.api.getWeixinSchedules();
+                schedules.value = res.schedules || [];
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function addAccount() {
+            try {
+                await props.api.createWeixinAccount(newAccountName.value);
+                showAddAccount.value = false;
+                newAccountName.value = '';
+                await loadAccounts();
+                showMessage('账号已创建，请点击"扫码登录"', 'success');
+            } catch (e) {
+                showMessage('创建失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function loginAccount(id) {
+            try {
+                await props.api.loginWeixinAccount(id);
+                showMessage('扫码登录已启动，请在弹出的浏览器窗口中扫码', 'info');
+                const timer = setInterval(async () => {
+                    await loadAccounts();
+                    const acc = accounts.value.find(a => a.id === id);
+                    if (acc && acc.status !== 'logging_in') {
+                        clearInterval(timer);
+                        if (acc.status === 'active') showMessage('登录成功！', 'success');
+                    }
+                }, 2000);
+            } catch (e) {
+                showMessage('登录失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function refreshAccount(id) {
+            try {
+                const res = await props.api.refreshWeixinAccount(id);
+                await loadAccounts();
+                showMessage(res.message, res.status === 'success' ? 'success' : 'info');
+            } catch (e) {
+                showMessage('刷新失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function deleteAccount(id) {
+            if (!confirm('确定删除该账号？')) return;
+            try {
+                await props.api.deleteWeixinAccount(id);
+                await loadAccounts();
+                showMessage('账号已删除', 'success');
+            } catch (e) {
+                showMessage('删除失败', 'error');
+            }
+        }
+
+        async function createUploadTask() {
+            try {
+                const tags = uploadForm.tagsStr ? uploadForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+                const payload = {
+                    account_id: parseInt(uploadForm.account_id),
+                    video_path: uploadForm.video_path,
+                    title: uploadForm.title || null,
+                    description: uploadForm.description || null,
+                    tags: tags.length ? tags : null,
+                    metadata_source: uploadForm.metadata_source,
+                    scheduled_at: uploadForm.scheduled_at ? new Date(uploadForm.scheduled_at).toISOString() : null,
+                };
+                const res = await props.api.createWeixinUpload(payload);
+                showMessage(res.message || '任务已创建', 'success');
+                uploadForm.video_path = '';
+                uploadForm.title = '';
+                uploadForm.description = '';
+                uploadForm.tagsStr = '';
+                uploadForm.scheduled_at = '';
+            } catch (e) {
+                showMessage('创建失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function createBatchUpload() {
+            try {
+                const paths = batchForm.video_paths.split('\n').map(p => p.trim()).filter(Boolean);
+                if (!paths.length) {
+                    showMessage('请输入视频路径', 'error');
+                    return;
+                }
+                const tags = batchForm.tagsStr ? batchForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+                const res = await props.api.createWeixinBatchUpload({
+                    account_id: parseInt(batchForm.account_id),
+                    video_paths: paths,
+                    tags: tags.length ? tags : null,
+                    metadata_source: batchForm.metadata_source,
+                });
+                showMessage('批量任务已创建，共 ' + res.total + ' 个', 'success');
+                batchForm.video_paths = '';
+                batchForm.tagsStr = '';
+            } catch (e) {
+                showMessage('创建失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function retryTask(id) {
+            try {
+                await props.api.retryWeixinTask(id);
+                showMessage('重试任务已启动', 'success');
+                await loadTasks();
+            } catch (e) {
+                showMessage('重试失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function deleteTask(id) {
+            if (!confirm('确定删除该任务？')) return;
+            try {
+                await props.api.deleteWeixinTask(id);
+                await loadTasks();
+                showMessage('任务已删除', 'success');
+            } catch (e) {
+                showMessage('删除失败', 'error');
+            }
+        }
+
+        async function createSchedule() {
+            try {
+                const paths = scheduleForm.video_paths.split('\n').map(p => p.trim()).filter(Boolean);
+                if (!paths.length) {
+                    showMessage('请输入视频路径', 'error');
+                    return;
+                }
+                const tags = scheduleForm.tagsStr ? scheduleForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+                const payload = {
+                    account_id: parseInt(scheduleForm.account_id),
+                    video_paths: paths,
+                    tags: tags.length ? tags : null,
+                    metadata_source: scheduleForm.metadata_source,
+                };
+                if (scheduleForm.schedule_type === 'interval') {
+                    payload.interval_minutes = scheduleForm.interval_minutes;
+                } else {
+                    payload.cron_expr = scheduleForm.cron_expr;
+                }
+                await props.api.createWeixinSchedule(payload);
+                showMessage('定时计划已创建', 'success');
+                await loadSchedules();
+            } catch (e) {
+                showMessage('创建失败: ' + (e.message || e), 'error');
+            }
+        }
+
+        async function deleteSchedule(id) {
+            if (!confirm('确定删除该定时计划？')) return;
+            try {
+                await props.api.deleteWeixinSchedule(id);
+                await loadSchedules();
+                showMessage('定时计划已删除', 'success');
+            } catch (e) {
+                showMessage('删除失败', 'error');
+            }
+        }
+
+        onMounted(() => {
+            loadAccounts();
+            loadSchedules();
+        });
+
+        return {
+            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message,
+            uploadForm, batchForm, scheduleForm,
+            formatDate, getFileName, getAccountName,
+            getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
+            loadAccounts, loadTasks, loadSchedules,
+            addAccount, loginAccount, refreshAccount, deleteAccount,
+            createUploadTask, createBatchUpload,
+            retryTask, deleteTask,
+            createSchedule, deleteSchedule, showMessage
         };
     }
 });
