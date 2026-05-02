@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 REM ViralDramaBot Web 应用启动脚本 (Windows)
 
 echo 🚀 启动 ViralDramaBot Web 应用...

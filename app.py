@@ -24,11 +24,13 @@ from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # ============================================================================
 # 打包环境检测和路径处理
@@ -81,33 +83,28 @@ initialize_app()
 config.update(work_dir=str(DATA_DIR))
 
 # 创建 FastAPI 应用
-app = FastAPI(
-    title="ViralDramaBot",
-    description="短剧自动化流水线 - Web 版本",
-    version="0.1.0"
-)
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    """初始化 SQLite 索引并启动后台修复任务"""
+@asynccontextmanager
+async def lifespan(app):
+    """应用生命周期管理：启动时初始化索引，关闭时清理后台任务"""
     global repair_task
     ensure_video_index_storage()
     repair_missing_video_entries()
     if repair_task is None or repair_task.done():
         repair_task = asyncio.create_task(periodic_index_repair())
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    """关闭后台修复任务"""
-    global repair_task
+    yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
         try:
             await repair_task
         except asyncio.CancelledError:
             pass
+
+app = FastAPI(
+    title="ViralDramaBot",
+    description="短剧自动化流水线 - Web 版本",
+    version="0.1.0",
+    lifespan=lifespan
+)
 
 # 配置 CORS（允许前端跨域请求）
 app.add_middleware(
@@ -136,22 +133,27 @@ async def root():
 
 class DownloadRequest(BaseModel):
     """下载请求模型"""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "tasks": [
+                        {"link": "https://v.douyin.com/7PkMlgCQjjY/", "file_name": "第一条视频"},
+                        {"link": "https://v.douyin.com/xxxxxxx/", "file_name": ""}
+                    ],
+                    "save_path": ".data",
+                    "max_concurrent": DEFAULT_MAX_CONCURRENT
+                }
+            ]
+        }
+    )
+
     tasks: Optional[List[Dict[str, Optional[str]]]] = None
     link: Optional[str] = None
     links: Optional[List[str]] = None
     save_path: Optional[str] = None
     file_name: Optional[str] = None
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
-    
-    class Config:
-        example = {
-            "tasks": [
-                {"link": "https://v.douyin.com/7PkMlgCQjjY/", "file_name": "第一条视频"},
-                {"link": "https://v.douyin.com/xxxxxxx/", "file_name": ""}
-            ],
-            "save_path": ".data",
-            "max_concurrent": DEFAULT_MAX_CONCURRENT
-        }
 
 
 class VideoInfo(BaseModel):

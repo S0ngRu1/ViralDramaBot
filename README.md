@@ -41,7 +41,7 @@ git clone <repository_url>
 cd ViralDramaBot
 
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+venv\Scripts\activate
 
 pip install -r requirements.txt
 ```
@@ -59,12 +59,6 @@ python app.py
 - ReDoc: `http://localhost:8000/redoc`
 
 也可以使用：
-
-```bash
-bash start-web.sh
-```
-
-Windows:
 
 ```bash
 start-web.bat
@@ -150,15 +144,15 @@ ViralDramaBot/
 ### 环境变量
 
 ```bash
-export WORK_DIR=".data"
-export DOWNLOAD_TIMEOUT="1200"
-export MAX_RETRIES="3"
-export DEBUG="1"
+set WORK_DIR=".data"
+set DOWNLOAD_TIMEOUT="1200"
+set MAX_RETRIES="3"
+set DEBUG="1"
 ```
 
 ### 默认配置
 
-当前默认值来自 [src/core/config.py](/home/caisongrui/Workspace/ViralDramaBot/src/core/config.py)：
+当前默认值来自 [src/core/config.py](./src/core/config.py)：
 
 - `WORK_DIR = .data`
 - `DOWNLOAD_TIMEOUT = 1200`

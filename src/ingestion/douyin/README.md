@@ -9,7 +9,7 @@
 - 下载视频文件
 - 回调下载进度
 
-它通过 [app.py](/home/caisongrui/Workspace/ViralDramaBot/app.py) 接入 Web 应用，也可以单独被 Python 代码调用。
+它通过 [app.py](../../../app.py) 接入 Web 应用，也可以单独被 Python 代码调用。
 
 ---
 
@@ -262,7 +262,7 @@ print(file_path)
 
 ## 运行参数
 
-关键配置来自 [src/core/config.py](/home/caisongrui/Workspace/ViralDramaBot/src/core/config.py)：
+关键配置来自 [src/core/config.py](../../core/config.py)：
 
 - `WORK_DIR`
 - `DOWNLOAD_TIMEOUT`

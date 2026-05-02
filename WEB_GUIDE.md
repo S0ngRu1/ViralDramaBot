@@ -26,14 +26,6 @@ python app.py
 
 ### 脚本启动
 
-Linux / macOS:
-
-```bash
-bash start-web.sh
-```
-
-Windows:
-
 ```bash
 start-web.bat
 ```
