@@ -1160,6 +1160,7 @@ async def weixin_create_upload_task(request: UploadTaskCreate, background_tasks:
                     description=request.description,
                     tags=request.tags,
                     metadata_source=request.metadata_source.value,
+                    drama_link=request.drama_link,
                 )
 
             background_tasks.add_task(do_upload)
@@ -1208,6 +1209,7 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
                         description=task.get("description"),
                         tags=task.get("tags"),
                         metadata_source=request.metadata_source.value,
+                        drama_link=request.drama_link,
                     )
 
         background_tasks.add_task(do_batch_upload)
