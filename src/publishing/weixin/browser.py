@@ -29,9 +29,11 @@ class BrowserPool:
     def _create_browser(self, user_data_dir: Optional[str] = None) -> ChromiumPage:
         """创建新的浏览器实例"""
         options = ChromiumOptions()
+        if WeixinConfig.BROWSER_PATH:
+            options.set_browser_path(WeixinConfig.BROWSER_PATH)
         if WeixinConfig.BROWSER_HEADLESS:
             options.headless()
-        options.set_timeouts(implicit=WeixinConfig.PAGE_LOAD_TIMEOUT)
+        options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
         # 反检测设置
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--disable-infobars")
@@ -120,9 +122,11 @@ def get_browser_for_account(account_cookie_path: str) -> ChromiumPage:
     用于首次扫码登录等需要独立浏览器的场景
     """
     options = ChromiumOptions()
+    if WeixinConfig.BROWSER_PATH:
+        options.set_browser_path(WeixinConfig.BROWSER_PATH)
     if WeixinConfig.BROWSER_HEADLESS:
         options.headless()
-    options.set_timeouts(implicit=WeixinConfig.PAGE_LOAD_TIMEOUT)
+    options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
     options.set_argument("--disable-blink-features=AutomationControlled")
     options.set_argument("--disable-infobars")
     options.set_argument("--no-sandbox")

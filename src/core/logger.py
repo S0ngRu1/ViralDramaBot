@@ -65,13 +65,16 @@ class Logger:
     def warn(self, message: str, context: Optional[Any] = None) -> None:
         """
         输出警告级别日志
-        
+
         Args:
             message: 日志消息
             context: 上下文信息（可选）
         """
         formatted = self._format_message(LogLevel.WARN, message, context)
         print(formatted)
+
+    # warning 是 warn 的别名，兼容 Python 标准 logging 命名
+    warning = warn
     
     def error(self, message: str, context: Optional[Any] = None) -> None:
         """

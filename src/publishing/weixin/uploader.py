@@ -6,6 +6,7 @@
 
 import json
 import random
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -121,7 +122,15 @@ class Uploader:
         """导航到视频发布页面"""
         logger.info("正在打开发布页面...")
         page.get(WeixinConfig.POST_CREATE_URL)
-        self._random_delay(2, 4)
+        self._random_delay(3, 5)
+
+        # 等待页面加载完成（可能是 iframe 架构）
+        # 先检查主页面是否有 iframe
+        iframe = page.ele("css:iframe", timeout=5)
+        if iframe:
+            logger.info("检测到 iframe，切换到内容框架")
+            # 切换到 iframe
+            page.get_frame(1)  # 切换到第一个 iframe
 
         # 确认页面加载完成
         create_btn = page.ele("css:input[type='file'], .upload-btn, .post-create", timeout=10)
@@ -137,21 +146,42 @@ class Uploader:
         logger.info(f"正在上传文件: {file_path}")
 
         # 方法1: 找到 input[type=file] 并注入文件路径
-        file_input = page.ele("css:input[type=file]", timeout=10)
-        if file_input:
-            file_input.input(file_path)
-            logger.info("文件路径已注入到 input 元素")
+        file_inputs = page.eles("css:input[type=file]", timeout=10)
+        for file_input in file_inputs:
+            # 确保是视频上传的 input
+            accept = file_input.attr("accept") or ""
+            if "video" in accept or ".mp4" in accept or ".mov" in accept or not accept:
+                file_input.input(file_path)
+                logger.info("文件路径已注入到 input 元素")
+                return
+
+        # 如果没有找到带 accept 属性的，尝试第一个
+        if file_inputs:
+            file_inputs[0].input(file_path)
+            logger.info("文件路径已注入到第一个 input 元素")
             return
 
         # 方法2: 点击上传按钮触发文件选择，然后注入
-        upload_area = page.ele("css:.upload-area, .upload-btn, .upload-wrapper", timeout=5)
-        if upload_area:
-            upload_area.click()
-            self._random_delay(1, 2)
-            file_input = page.ele("css:input[type=file]", timeout=5)
-            if file_input:
-                file_input.input(file_path)
-                return
+        upload_selectors = [
+            "css:.upload-area",
+            "css:.upload-btn",
+            "css:.upload-wrapper",
+            "css:[class*='upload']",
+            "text:上传视频",
+            "text:选择视频",
+        ]
+        for selector in upload_selectors:
+            try:
+                upload_area = page.ele(selector, timeout=3)
+                if upload_area:
+                    upload_area.click()
+                    self._random_delay(1, 2)
+                    file_input = page.ele("css:input[type=file]", timeout=5)
+                    if file_input:
+                        file_input.input(file_path)
+                        return
+            except Exception:
+                continue
 
         raise Exception("无法找到文件上传入口")
 
@@ -162,16 +192,19 @@ class Uploader:
 
         while time.time() - start_time < WeixinConfig.UPLOAD_TIMEOUT:
             # 检查上传进度
-            progress = page.ele("css:.progress, .upload-progress, .el-progress", timeout=2)
-            if progress:
-                text = progress.text
-                # 尝试提取百分比
-                percent_match = text.match(r"(\d+)%")
-                if percent_match:
-                    percent = int(percent_match.group(1))
-                    logger.debug(f"上传进度: {percent}%")
-                    if percent >= 100:
-                        break
+            try:
+                progress = page.ele("css:.progress, .upload-progress, .el-progress", timeout=2)
+                if progress:
+                    text = progress.text
+                    # 尝试提取百分比
+                    percent_match = re.search(r"(\d+)%", text)
+                    if percent_match:
+                        percent = int(percent_match.group(1))
+                        logger.info(f"上传进度: {percent}%")
+                        if percent >= 100:
+                            break
+            except Exception:
+                pass
 
             # 检查是否出现"上传成功"或编辑区域
             success_indicator = page.ele(
@@ -184,9 +217,12 @@ class Uploader:
                 return
 
             # 检查是否有错误提示
-            error = page.ele("css:.error-message, .upload-error", timeout=1)
-            if error:
-                raise Exception(f"上传出错: {error.text}")
+            try:
+                error = page.ele("css:.error-message, .upload-error", timeout=1)
+                if error:
+                    raise Exception(f"上传出错: {error.text}")
+            except Exception:
+                pass
 
             time.sleep(3)
 
@@ -195,28 +231,102 @@ class Uploader:
     def _fill_metadata(self, page: ChromiumPage, metadata: VideoMetadata):
         """填写标题、描述、标签"""
         logger.info("正在填写视频信息...")
+        self._random_delay(1, 2)
 
-        # 填写标题
+        # 填写标题（视频号的标题输入框）
         if metadata.title:
-            title_input = page.ele(
-                "css:input[placeholder*=标题], textarea[placeholder*=标题], .title-input",
-                timeout=5,
-            )
-            if title_input:
-                title_input.clear()
-                self._human_type(title_input, metadata.title)
-                logger.info(f"标题已填写: {metadata.title}")
+            title_filled = False
+            # 尝试多种选择器
+            title_selectors = [
+                "css:input[placeholder*='标题']",
+                "css:input[placeholder*='填写标题']",
+                "css:input[placeholder*='请输入标题']",
+                "css:.title-input input",
+                "css:.post-title input",
+                "css:.video-title input",
+                "css:[class*='title'] input",
+                "css:[class*='title'] textarea",
+            ]
+            for selector in title_selectors:
+                try:
+                    title_input = page.ele(selector, timeout=2)
+                    if title_input and title_input.attr("type") != "file":
+                        title_input.clear()
+                        self._human_type(title_input, metadata.title)
+                        logger.info(f"标题已填写: {metadata.title}")
+                        title_filled = True
+                        break
+                except Exception:
+                    continue
+
+            if not title_filled:
+                # 尝试通过 JavaScript 填写
+                try:
+                    page.run_js(f"""
+                        var inputs = document.querySelectorAll('input[type="text"], textarea');
+                        for (var i = 0; i < inputs.length; i++) {{
+                            var input = inputs[i];
+                            var placeholder = input.getAttribute('placeholder') || '';
+                            if (placeholder.includes('标题') || placeholder.includes('title')) {{
+                                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                nativeInputValueSetter.call(input, '{metadata.title}');
+                                input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                break;
+                            }}
+                        }}
+                    """)
+                    logger.info("标题已通过 JavaScript 填写")
+                except Exception as e:
+                    logger.warning(f"标题填写失败: {e}")
 
         # 填写描述/正文
         if metadata.description:
-            desc_input = page.ele(
-                "css:textarea[placeholder*=描述], textarea[placeholder*=正文], .desc-input, .content-editor",
-                timeout=5,
-            )
-            if desc_input:
-                desc_input.clear()
-                self._human_type(desc_input, metadata.description)
-                logger.info("描述已填写")
+            desc_filled = False
+            desc_selectors = [
+                "css:textarea[placeholder*='描述']",
+                "css:textarea[placeholder*='正文']",
+                "css:textarea[placeholder*='添加描述']",
+                "css:textarea[placeholder*='请输入描述']",
+                "css:.desc-input textarea",
+                "css:.content-editor textarea",
+                "css:.post-content textarea",
+                "css:[class*='desc'] textarea",
+                "css:[class*='content'] textarea",
+                "css:.ql-editor",  # 富文本编辑器
+                "css:[contenteditable='true']",
+            ]
+            for selector in desc_selectors:
+                try:
+                    desc_input = page.ele(selector, timeout=2)
+                    if desc_input:
+                        desc_input.clear()
+                        self._human_type(desc_input, metadata.description)
+                        logger.info("描述已填写")
+                        desc_filled = True
+                        break
+                except Exception:
+                    continue
+
+            if not desc_filled:
+                try:
+                    page.run_js(f"""
+                        var textareas = document.querySelectorAll('textarea, [contenteditable="true"]');
+                        for (var i = 0; i < textareas.length; i++) {{
+                            var ta = textareas[i];
+                            var placeholder = ta.getAttribute('placeholder') || '';
+                            if (placeholder.includes('描述') || placeholder.includes('正文') || placeholder.includes('添加')) {{
+                                var nativeTextAreaValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                                nativeTextAreaValueSetter.call(ta, '{metadata.description}');
+                                ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                                ta.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                                break;
+                            }}
+                        }}
+                    """)
+                    logger.info("描述已通过 JavaScript 填写")
+                except Exception as e:
+                    logger.warning(f"描述填写失败: {e}")
 
         # 添加标签
         if metadata.tags:
@@ -227,22 +337,50 @@ class Uploader:
 
     def _add_tag(self, page: ChromiumPage, tag: str):
         """添加单个标签"""
-        # 尝试找到标签输入框
-        tag_input = page.ele(
-            "css:input[placeholder*=标签], input[placeholder*=话题], .tag-input",
-            timeout=3,
-        )
-        if tag_input:
-            tag_input.clear()
-            self._human_type(tag_input, tag)
-            self._random_delay(0.5, 1)
-            # 按回车确认标签
-            tag_input.input("\n")
-            self._random_delay(0.3, 0.8)
-            logger.info(f"标签已添加: #{tag}")
-        else:
-            # 尝试在描述中添加 # 标签
-            logger.warning(f"未找到标签输入框，跳过标签: {tag}")
+        tag_selectors = [
+            "css:input[placeholder*='标签']",
+            "css:input[placeholder*='话题']",
+            "css:input[placeholder*='添加标签']",
+            "css:input[placeholder*='添加话题']",
+            "css:.tag-input input",
+            "css:[class*='tag'] input",
+            "css:[class*='topic'] input",
+        ]
+
+        for selector in tag_selectors:
+            try:
+                tag_input = page.ele(selector, timeout=2)
+                if tag_input:
+                    tag_input.clear()
+                    self._human_type(tag_input, tag)
+                    self._random_delay(0.5, 1)
+                    # 按回车确认标签
+                    tag_input.input("\n")
+                    self._random_delay(0.3, 0.8)
+                    logger.info(f"标签已添加: #{tag}")
+                    return
+            except Exception:
+                continue
+
+        # 尝试通过 JavaScript 添加标签
+        try:
+            page.run_js(f"""
+                var inputs = document.querySelectorAll('input');
+                for (var i = 0; i < inputs.length; i++) {{
+                    var input = inputs[i];
+                    var placeholder = input.getAttribute('placeholder') || '';
+                    if (placeholder.includes('标签') || placeholder.includes('话题')) {{
+                        var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        nativeInputValueSetter.call(input, '{tag}');
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        input.dispatchEvent(new KeyboardEvent('keydown', {{ key: 'Enter', keyCode: 13, bubbles: true }}));
+                        break;
+                    }}
+                }}
+            """)
+            logger.info(f"标签已通过 JavaScript 添加: #{tag}")
+        except Exception as e:
+            logger.warning(f"标签添加失败: {tag}, 错误: {e}")
 
     def _set_schedule_time(self, page: ChromiumPage, scheduled_at: datetime):
         """设置定时发布时间"""

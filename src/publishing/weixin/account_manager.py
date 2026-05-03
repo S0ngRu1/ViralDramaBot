@@ -58,9 +58,9 @@ class AccountManager:
 
             # 等待用户扫码（检测登录状态变化）
             logger.info("请使用微信扫描二维码登录...")
-            login_success = self._wait_for_login(page, timeout=120)
+            login_result = self._wait_for_login(page, timeout=120)
 
-            if login_success:
+            if login_result["success"]:
                 self._save_cookies(page, cookie_path)
                 # 尝试获取微信昵称
                 wechat_id = self._extract_wechat_id(page)
@@ -73,7 +73,7 @@ class AccountManager:
             else:
                 self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
                 page.quit()
-                return {"status": "timeout", "message": "扫码超时，请重试"}
+                return {"status": "failed", "message": login_result["message"]}
 
         except Exception as e:
             logger.error(f"登录失败: {e}")
@@ -93,7 +93,7 @@ class AccountManager:
 
         cookie_path = account["cookie_path"]
         if not Path(cookie_path).exists():
-            logger.warning(f"Cookie 文件不存在: {cookie_path}")
+            logger.warn(f"Cookie 文件不存在: {cookie_path}")
             self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
             return False
 
@@ -103,14 +103,15 @@ class AccountManager:
             page.get(WeixinConfig.CHANNELS_URL)
             time.sleep(3)
 
-            if self._check_login_status(page):
+            result = self._check_login_status(page)
+            if result["success"]:
                 self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
                 logger.info(f"自动登录成功: {account['name']}")
                 page.quit()
                 return True
             else:
                 self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
-                logger.warning(f"Cookie 已过期: {account['name']}")
+                logger.warn(f"Cookie 已过期: {account['name']}")
                 page.quit()
                 return False
 
@@ -144,34 +145,116 @@ class AccountManager:
         """删除账号"""
         return self.dao.delete_account(account_id)
 
-    def _wait_for_login(self, page: ChromiumPage, timeout: int = 120) -> bool:
-        """等待用户扫码登录"""
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self._check_login_status(page):
-                return True
-            time.sleep(2)
-        return False
+    def _wait_for_login(self, page: ChromiumPage, timeout: int = 120) -> dict:
+        """
+        等待用户扫码登录
 
-    def _check_login_status(self, page: ChromiumPage) -> bool:
-        """检查是否已登录"""
+        Returns:
+            dict: {"success": bool, "message": str}
+        """
+        start_time = time.time()
+        check_count = 0
+
+        while time.time() - start_time < timeout:
+            check_count += 1
+            result = self._check_login_status(page)
+
+            if result["success"]:
+                return {"success": True, "message": "登录成功"}
+
+            if result["error"]:
+                return {"success": False, "message": result["error"]}
+
+            # 每次检查后打印状态（每 5 次检查打印一次）
+            if check_count % 5 == 0:
+                elapsed = int(time.time() - start_time)
+                logger.info(f"等待扫码中... 已等待 {elapsed} 秒")
+
+            time.sleep(2)
+
+        return {"success": False, "message": "扫码超时，请重试"}
+
+    def _check_login_status(self, page: ChromiumPage) -> dict:
+        """
+        检查登录状态
+
+        Returns:
+            dict: {"success": bool, "error": str|None}
+        """
         try:
-            # 检查页面上是否有登录成功的标志元素
-            # 视频号创作者中心登录后会显示用户头像或管理页面
             url = page.url
+
+            # 检查是否已离开登录页面（登录成功）
             if "channels.weixin.qq.com" in url and "/login" not in url:
                 # 检查是否有用户信息元素
-                user_elem = page.ele("css:.user-info, .avatar, .nickname", timeout=3)
+                user_elem = page.ele("css:.user-info, .avatar, .nickname", timeout=2)
                 if user_elem:
-                    return True
+                    return {"success": True, "error": None}
                 # 备用检测：检查 cookie 中是否有关键 token
                 cookies = page.cookies()
                 for cookie in cookies:
                     if cookie.get("name") in ("slave_sid", "bizuin"):
-                        return True
-            return False
+                        return {"success": True, "error": None}
+
+            # 检查页面上的错误提示
+            error_text = self._detect_login_error(page)
+            if error_text:
+                return {"success": False, "error": error_text}
+
+            return {"success": False, "error": None}
+
         except Exception:
-            return False
+            return {"success": False, "error": None}
+
+    def _detect_login_error(self, page: ChromiumPage) -> Optional[str]:
+        """
+        检测登录页面上的错误提示
+
+        Returns:
+            str: 错误信息，无错误返回 None
+        """
+        try:
+            # 常见的错误提示关键词
+            error_keywords = [
+                "没有授权", "未授权", "授权失败", "登录失败",
+                "二维码已过期", "已过期", "已失效",
+                "异常", "错误", "失败", "无法登录",
+                "账号异常", "被封禁", "被限制"
+            ]
+
+            # 尝试查找错误提示元素
+            # 常见的错误提示选择器
+            error_selectors = [
+                "css:.error-tip", "css:.error-msg", "css:.login-error",
+                "css:.qrcode-expired", "css:.tip-text", "css:.warning",
+                "css:[class*='error']", "css:[class*='tip']"
+            ]
+
+            for selector in error_selectors:
+                try:
+                    elem = page.ele(selector, timeout=0.5)
+                    if elem:
+                        text = elem.text.strip()
+                        if text and any(keyword in text for keyword in error_keywords):
+                            return text
+                except Exception:
+                    continue
+
+            # 检查页面上的所有文本节点（性能较差，作为后备方案）
+            body_text = page.ele("tag:body", timeout=1)
+            if body_text:
+                text = body_text.text
+                for keyword in error_keywords:
+                    if keyword in text:
+                        # 提取包含关键词的句子
+                        for line in text.split('\n'):
+                            if keyword in line:
+                                return line.strip()[:100]  # 限制长度
+
+            return None
+
+        except Exception:
+            return None
 
     def _save_cookies(self, page: ChromiumPage, cookie_path: str):
         """保存 Cookie 到文件"""

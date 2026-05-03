@@ -12,7 +12,7 @@ class WeixinConfig:
     # 视频号创作者中心 URL
     CHANNELS_URL = "https://channels.weixin.qq.com"
     POST_CREATE_URL = f"{CHANNELS_URL}/platform/post/create"
-    LOGIN_URL = f"{CHANNELS_URL}/platform/login"
+    LOGIN_URL = f"{CHANNELS_URL}/login.html?from=assistant"
 
     # 数据目录
     DATA_DIR = Path(os.getenv("WORK_DIR", Path.home() / ".viraldramabot_data")) / "weixin"
@@ -21,6 +21,7 @@ class WeixinConfig:
     DB_PATH = DATA_DIR / "weixin.db"
 
     # 浏览器配置
+    BROWSER_PATH = os.getenv("BROWSER_PATH", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
     MAX_BROWSER_INSTANCES = 3  # 最大同时运行的浏览器实例数
     BROWSER_HEADLESS = False  # 视频号需要扫码，默认不使用无头模式
     PAGE_LOAD_TIMEOUT = 30  # 页面加载超时（秒）

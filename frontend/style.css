@@ -82,12 +82,24 @@ body {
     margin-bottom: 28px;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     padding: 14px 16px;
     border-radius: var(--radius-md);
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.12);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-logo .logo-img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+}
+
+.sidebar-logo .logo-text {
+    font-size: 20px;
+    letter-spacing: 0.02em;
 }
 
 .sidebar-menu {

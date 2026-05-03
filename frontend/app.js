@@ -305,7 +305,8 @@ const app = createApp({
             <!-- 侧边栏 -->
             <div class="sidebar">
                 <div class="sidebar-logo">
-                    <span>🎬 ViralDramaBot</span>
+                    <img src="./logo.png" alt="ViralDramaBot" class="logo-img">
+                    <span class="logo-text">ViralDramaBot</span>
                 </div>
                 <ul class="sidebar-menu">
                     <li>
