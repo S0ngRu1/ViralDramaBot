@@ -124,6 +124,30 @@ const api = {
     },
 
     /**
+     * 选择单个视频文件
+     */
+    browseFile: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/browse-file`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    /**
+     * 选择多个视频文件
+     */
+    browseFiles: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/browse-files`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    /**
      * 解析视频信息
      */
     parseVideoInfo: async (link) => {
@@ -1286,6 +1310,7 @@ app.component('weixin-page', {
             <div class="tabs">
                 <div :class="['tab', { active: tab === 'accounts' }]" @click="tab = 'accounts'">账号管理</div>
                 <div :class="['tab', { active: tab === 'upload' }]" @click="tab = 'upload'">上传视频</div>
+                <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
                 <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
                 <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
             </div>
@@ -1304,6 +1329,7 @@ app.component('weixin-page', {
                                 <th>名称</th>
                                 <th>微信ID</th>
                                 <th>状态</th>
+                                <th>备注</th>
                                 <th>创建时间</th>
                                 <th>操作</th>
                             </tr>
@@ -1314,13 +1340,20 @@ app.component('weixin-page', {
                                 <td>{{ acc.name }}</td>
                                 <td>{{ acc.wechat_id || '-' }}</td>
                                 <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
+                                <td>
+                                    <span v-if="acc.status === 'expired' || acc.status === 'error'" style="color: #ff4d4f; font-size: 13px;">需重新登录</span>
+                                    <span v-else style="color: #999; font-size: 13px;">-</span>
+                                </td>
                                 <td>{{ formatDate(acc.created_at) }}</td>
                                 <td>
                                     <div class="action-group">
                                         <button class="btn btn-primary btn-small" @click="loginAccount(acc.id)" :disabled="acc.status === 'logging_in'">
                                             {{ acc.status === 'logging_in' ? '扫码中...' : '扫码登录' }}
                                         </button>
-                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)">刷新</button>
+                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)" :disabled="refreshingIds.has(acc.id)">
+                                            <span v-if="refreshingIds.has(acc.id)"><span class="spinner"></span> 刷新中</span>
+                                            <span v-else>刷新</span>
+                                        </button>
                                         <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)">删除</button>
                                     </div>
                                 </td>
@@ -1345,8 +1378,18 @@ app.component('weixin-page', {
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>视频文件路径</label>
-                        <input v-model="uploadForm.video_path" type="text" placeholder="输入视频文件的完整路径，如 C:\\Videos\\test.mp4">
+                        <label>视频文件</label>
+                        <div class="row">
+                            <div class="col">
+                                <input :value="uploadForm.video_path" type="text" placeholder="请选择视频文件" readonly>
+                            </div>
+                            <div style="display: flex; align-items: end;">
+                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingFile">
+                                    <span v-if="!isBrowsingFile">选择文件</span>
+                                    <span v-else>选择中...</span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>元数据来源</label>
@@ -1383,7 +1426,10 @@ app.component('weixin-page', {
                         {{ uploadForm.scheduled_at ? '定时上传' : '立即上传' }}
                     </button>
                 </div>
+            </div>
 
+            <!-- 批量上传 -->
+            <div v-if="tab === 'batch'">
                 <div class="card">
                     <div class="card-title">批量上传</div>
                     <div class="form-group">
@@ -1396,8 +1442,32 @@ app.component('weixin-page', {
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>视频文件路径（每行一个）</label>
-                        <textarea v-model="batchForm.video_paths" rows="5" placeholder="C:\\Videos\\video1.mp4&#10;C:\\Videos\\video2.mp4&#10;C:\\Videos\\video3.mp4"></textarea>
+                        <label>视频文件列表</label>
+                        <table class="table" style="margin-bottom: 10px;" v-if="batchForm.videoFiles.length">
+                            <thead>
+                                <tr>
+                                    <th style="width: 85%;">文件路径</th>
+                                    <th style="width: 15%;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(file, idx) in batchForm.videoFiles" :key="idx">
+                                    <td class="truncate" :title="file">{{ file }}</td>
+                                    <td>
+                                        <button class="btn btn-danger btn-small" @click="removeBatchFile(idx)">删除</button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div class="row">
+                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingFile">
+                                <span v-if="!isBrowsingFile">选择文件（可多选）</span>
+                                <span v-else>选择中...</span>
+                            </button>
+                        </div>
+                        <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                            已选 {{ batchForm.videoFiles.length }} 个文件
+                        </p>
                     </div>
                     <div class="form-group">
                         <label>标签（所有视频共用，用逗号分隔）</label>
@@ -1415,7 +1485,7 @@ app.component('weixin-page', {
                             <option value="directory">从目录名读取</option>
                         </select>
                     </div>
-                    <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!batchForm.account_id || !batchForm.video_paths">
+                    <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!batchForm.account_id || batchForm.videoFiles.length === 0">
                         批量上传
                     </button>
                 </div>
@@ -1562,6 +1632,8 @@ app.component('weixin-page', {
         const schedules = ref([]);
         const showAddAccount = ref(false);
         const newAccountName = ref('');
+        const refreshingIds = ref(new Set());
+        const isBrowsingFile = ref(false);
         const message = reactive({ show: false, type: 'info', text: '' });
 
         const uploadForm = reactive({
@@ -1569,7 +1641,7 @@ app.component('weixin-page', {
             tagsStr: '', metadata_source: 'manual', scheduled_at: '', drama_link: ''
         });
         const batchForm = reactive({
-            account_id: '', video_paths: '', tagsStr: '', metadata_source: 'manual', drama_link: ''
+            account_id: '', videoFiles: [], tagsStr: '', metadata_source: 'manual', drama_link: ''
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -1666,6 +1738,7 @@ app.component('weixin-page', {
                     if (acc && acc.status !== 'logging_in') {
                         clearInterval(timer);
                         if (acc.status === 'active') showMessage('登录成功！', 'success');
+                        else showMessage('登录未完成：' + getStatusText(acc.status), 'info');
                     }
                 }, 2000);
             } catch (e) {
@@ -1674,12 +1747,15 @@ app.component('weixin-page', {
         }
 
         async function refreshAccount(id) {
+            refreshingIds.value.add(id);
             try {
                 const res = await props.api.refreshWeixinAccount(id);
                 await loadAccounts();
                 showMessage(res.message, res.status === 'success' ? 'success' : 'info');
             } catch (e) {
                 showMessage('刷新失败: ' + (e.message || e), 'error');
+            } finally {
+                refreshingIds.value.delete(id);
             }
         }
 
@@ -1692,6 +1768,44 @@ app.component('weixin-page', {
             } catch (e) {
                 showMessage('删除失败', 'error');
             }
+        }
+
+        async function browseUploadFile() {
+            if (isBrowsingFile.value) return;
+            isBrowsingFile.value = true;
+            try {
+                const res = await props.api.browseFile();
+                if (res.status === 'success' && res.path) {
+                    uploadForm.video_path = res.path;
+                }
+            } catch (e) {
+                showMessage('选择文件失败: ' + (e.message || e), 'error');
+            } finally {
+                isBrowsingFile.value = false;
+            }
+        }
+
+        async function browseBatchFiles() {
+            if (isBrowsingFile.value) return;
+            isBrowsingFile.value = true;
+            try {
+                const res = await props.api.browseFiles();
+                if (res.status === 'success' && res.paths) {
+                    for (const p of res.paths) {
+                        if (!batchForm.videoFiles.includes(p)) {
+                            batchForm.videoFiles.push(p);
+                        }
+                    }
+                }
+            } catch (e) {
+                showMessage('选择文件失败: ' + (e.message || e), 'error');
+            } finally {
+                isBrowsingFile.value = false;
+            }
+        }
+
+        function removeBatchFile(idx) {
+            batchForm.videoFiles.splice(idx, 1);
         }
 
         async function createUploadTask() {
@@ -1722,21 +1836,20 @@ app.component('weixin-page', {
 
         async function createBatchUpload() {
             try {
-                const paths = batchForm.video_paths.split('\n').map(p => p.trim()).filter(Boolean);
-                if (!paths.length) {
-                    showMessage('请输入视频路径', 'error');
+                if (!batchForm.videoFiles.length) {
+                    showMessage('请选择视频文件', 'error');
                     return;
                 }
                 const tags = batchForm.tagsStr ? batchForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
                 const res = await props.api.createWeixinBatchUpload({
                     account_id: parseInt(batchForm.account_id),
-                    video_paths: paths,
+                    video_paths: batchForm.videoFiles,
                     tags: tags.length ? tags : null,
                     metadata_source: batchForm.metadata_source,
                     drama_link: batchForm.drama_link || null,
                 });
                 showMessage('批量任务已创建，共 ' + res.total + ' 个', 'success');
-                batchForm.video_paths = '';
+                batchForm.videoFiles = [];
                 batchForm.tagsStr = '';
                 batchForm.drama_link = '';
             } catch (e) {
@@ -1809,12 +1922,13 @@ app.component('weixin-page', {
         });
 
         return {
-            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message,
+            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds, isBrowsingFile,
             uploadForm, batchForm, scheduleForm,
             formatDate, getFileName, getAccountName,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
             loadAccounts, loadTasks, loadSchedules,
             addAccount, loginAccount, refreshAccount, deleteAccount,
+            browseUploadFile, browseBatchFiles, removeBatchFile,
             createUploadTask, createBatchUpload,
             retryTask, deleteTask,
             createSchedule, deleteSchedule, showMessage

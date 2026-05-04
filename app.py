@@ -57,7 +57,7 @@ sys.path.insert(0, str(project_root))
 
 from src.ingestion.douyin import get_downloader, DouyinDownloader
 from src.publishing.weixin.dao import WeixinDAO
-from src.publishing.weixin.account_manager import AccountManager
+from src.publishing.weixin.account_manager import AccountManager, CookieChecker
 from src.publishing.weixin.uploader import Uploader
 from src.publishing.weixin.scheduler import UploadScheduler
 from src.publishing.weixin.schemas import (
@@ -102,6 +102,8 @@ async def lifespan(app):
         repair_task = asyncio.create_task(periodic_index_repair())
     # 启动视频号定时调度器
     weixin_scheduler.start()
+    # 启动 Cookie 后台轮询（每小时检查一次）
+    weixin_cookie_checker.start()
     yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
@@ -109,6 +111,8 @@ async def lifespan(app):
             await repair_task
         except asyncio.CancelledError:
             pass
+    # 停止 Cookie 轮询
+    weixin_cookie_checker.stop()
     # 停止视频号调度器
     weixin_scheduler.stop()
 
@@ -128,6 +132,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# 禁用静态文件缓存（开发环境）
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 # 挂载前端静态文件到 /frontend 路径
 frontend_dir = project_root / "frontend"
@@ -214,6 +231,7 @@ weixin_dao = WeixinDAO()
 weixin_account_mgr = AccountManager(weixin_dao)
 weixin_uploader = Uploader(weixin_dao)
 weixin_scheduler = UploadScheduler(weixin_dao)
+weixin_cookie_checker = CookieChecker(weixin_account_mgr)
 
 
 # ============================================================================
@@ -926,6 +944,56 @@ async def get_download_progress() -> Dict[str, Any]:
     )
 
 
+@app.get("/api/browse-file")
+async def browse_file() -> Dict[str, Any]:
+    """打开系统文件选择器（单个视频文件）"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected_file = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
+        )
+        root.destroy()
+
+        if not selected_file:
+            return {"status": "cancelled", "message": "未选择文件"}
+
+        return {"status": "success", "path": selected_file}
+    except Exception as e:
+        logger.error(f"❌ 打开文件选择器失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/browse-files")
+async def browse_files() -> Dict[str, Any]:
+    """打开系统文件选择器（多个视频文件）"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected_files = filedialog.askopenfilenames(
+            title="选择视频文件（可多选）",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
+        )
+        root.destroy()
+
+        if not selected_files:
+            return {"status": "cancelled", "message": "未选择文件"}
+
+        return {"status": "success", "paths": list(selected_files)}
+    except Exception as e:
+        logger.error(f"❌ 打开文件选择器失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/browse-directory")
 async def browse_directory() -> Dict[str, Any]:
     """打开系统目录选择器并返回用户选择的路径"""
@@ -1099,6 +1167,15 @@ async def weixin_refresh_account(account_id: int) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"刷新登录失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/accounts/check-cookies")
+async def weixin_check_cookies(background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """手动触发所有账号的 Cookie 有效性检查"""
+    def do_check():
+        weixin_account_mgr.check_all_accounts_cookies()
+    background_tasks.add_task(do_check)
+    return {"status": "started", "message": "Cookie 检查已在后台启动"}
 
 
 @app.delete("/api/weixin/accounts/{account_id}")

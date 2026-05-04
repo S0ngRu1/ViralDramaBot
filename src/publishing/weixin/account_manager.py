@@ -6,16 +6,22 @@
 
 import json
 import time
+import threading
 from pathlib import Path
 from typing import Optional
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from DrissionPage import ChromiumPage
 
 from .browser import get_browser_for_account
 from .config import WeixinConfig
+from DrissionPage import ChromiumOptions
 from .dao import WeixinDAO
 from .schemas import AccountStatus
 from src.core.logger import logger
+
+# Cookie 轮询间隔（秒）
+COOKIE_CHECK_INTERVAL_SECONDS = 3600  # 每小时检查一次
 
 
 class AccountManager:
@@ -50,6 +56,7 @@ class AccountManager:
         self.dao.update_account_status(account_id, AccountStatus.LOGGING_IN)
         cookie_path = account["cookie_path"]
 
+        page = None
         try:
             page = get_browser_for_account(cookie_path)
             logger.info(f"正在打开视频号登录页面...")
@@ -68,21 +75,31 @@ class AccountManager:
                     account_id, AccountStatus.ACTIVE, wechat_id
                 )
                 logger.info(f"账号登录成功: {account['name']}")
-                page.quit()
                 return {"status": "success", "message": "登录成功"}
             else:
-                self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
-                page.quit()
-                return {"status": "failed", "message": login_result["message"]}
+                msg = login_result["message"]
+                if "浏览器已关闭" in msg:
+                    self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                    logger.info(f"用户关闭了浏览器，取消登录: {account['name']}")
+                else:
+                    self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                return {"status": "failed", "message": msg}
 
         except Exception as e:
             logger.error(f"登录失败: {e}")
             self.dao.update_account_status(account_id, AccountStatus.ERROR)
             return {"status": "error", "message": str(e)}
+        finally:
+            # 确保浏览器实例被清理（用户关闭页面时 page.quit() 可能抛异常）
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
 
     def auto_login(self, account_id: int) -> bool:
         """
-        自动登录（使用已保存的 Cookie）
+        自动登录（使用已保存的 Cookie，后台静默验证，不弹出浏览器）
 
         Returns:
             bool: 登录是否成功
@@ -97,8 +114,9 @@ class AccountManager:
             self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
             return False
 
+        page = None
         try:
-            page = get_browser_for_account(cookie_path)
+            page = self._create_headless_browser(cookie_path)
             self._load_cookies(page, cookie_path)
             page.get(WeixinConfig.CHANNELS_URL)
             time.sleep(3)
@@ -107,31 +125,33 @@ class AccountManager:
             if result["success"]:
                 self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
                 logger.info(f"自动登录成功: {account['name']}")
-                page.quit()
                 return True
             else:
                 self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
                 logger.warn(f"Cookie 已过期: {account['name']}")
-                page.quit()
                 return False
 
         except Exception as e:
             logger.error(f"自动登录失败: {e}")
             self.dao.update_account_status(account_id, AccountStatus.ERROR)
             return False
+        finally:
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
 
     def refresh_login(self, account_id: int) -> dict:
-        """刷新登录状态"""
+        """刷新登录状态（仅无头检测，不弹浏览器）"""
         account = self.dao.get_account(account_id)
         if not account:
             raise ValueError(f"账号不存在: {account_id}")
 
-        # 先尝试自动登录
         if self.auto_login(account_id):
-            return {"status": "success", "message": "自动登录成功"}
+            return {"status": "success", "message": "登录状态正常", "need_relogin": False}
         else:
-            # 自动登录失败，触发扫码登录
-            return self.login_with_qrcode(account_id)
+            return {"status": "expired", "message": "Cookie 已过期，需重新登录", "need_relogin": True}
 
     def get_account(self, account_id: int) -> Optional[dict]:
         """获取账号信息"""
@@ -163,6 +183,8 @@ class AccountManager:
                 return {"success": True, "message": "登录成功"}
 
             if result["error"]:
+                if "浏览器已关闭" in result["error"]:
+                    logger.info("检测到浏览器已关闭，停止等待扫码")
                 return {"success": False, "message": result["error"]}
 
             # 每次检查后打印状态（每 5 次检查打印一次）
@@ -174,6 +196,16 @@ class AccountManager:
 
         return {"success": False, "message": "扫码超时，请重试"}
 
+    @staticmethod
+    def _is_browser_alive(page: ChromiumPage) -> bool:
+        """检查浏览器进程是否还在运行"""
+        try:
+            # 通过 WebSocket 连接状态判断：执行简单 JS，浏览器已断开时会抛异常
+            page.run_js("1+1")
+            return True
+        except Exception:
+            return False
+
     def _check_login_status(self, page: ChromiumPage) -> dict:
         """
         检查登录状态
@@ -181,6 +213,10 @@ class AccountManager:
         Returns:
             dict: {"success": bool, "error": str|None}
         """
+        # 先检测浏览器是否还活着
+        if not self._is_browser_alive(page):
+            return {"success": False, "error": "浏览器已关闭"}
+
         try:
             url = page.url
 
@@ -203,7 +239,19 @@ class AccountManager:
 
             return {"success": False, "error": None}
 
-        except Exception:
+        except (ConnectionError, ConnectionRefusedError, ConnectionResetError,
+                OSError, BrokenPipeError):
+            return {"success": False, "error": "浏览器已关闭"}
+
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(kw in err_str for kw in ("disconnected", "closed", "not reachable",
+                                              "connection refused", "connection reset",
+                                              "目标计算机积极拒绝", "远程主机强迫关闭")):
+                return {"success": False, "error": "浏览器已关闭"}
+            # 其他未知异常也可能是浏览器断开导致的，再次检测
+            if not self._is_browser_alive(page):
+                return {"success": False, "error": "浏览器已关闭"}
             return {"success": False, "error": None}
 
     def _detect_login_error(self, page: ChromiumPage) -> Optional[str]:
@@ -256,6 +304,22 @@ class AccountManager:
         except Exception:
             return None
 
+    @staticmethod
+    def _create_headless_browser(cookie_path: str) -> ChromiumPage:
+        """创建无头浏览器（用于后台 Cookie 验证，不弹窗）"""
+        options = ChromiumOptions()
+        if WeixinConfig.BROWSER_PATH:
+            options.set_browser_path(WeixinConfig.BROWSER_PATH)
+        options.headless()
+        options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
+        options.set_argument("--disable-blink-features=AutomationControlled")
+        options.set_argument("--no-sandbox")
+        user_data_dir = str(
+            WeixinConfig.COOKIES_DIR / f"profile_{hash(cookie_path)}"
+        )
+        options.set_user_data_path(user_data_dir)
+        return ChromiumPage(options)
+
     def _save_cookies(self, page: ChromiumPage, cookie_path: str):
         """保存 Cookie 到文件"""
         cookies = page.cookies()
@@ -280,3 +344,79 @@ class AccountManager:
             return elem.text if elem else None
         except Exception:
             return None
+
+    def check_all_accounts_cookies(self) -> dict:
+        """
+        批量检查所有活跃账号的 Cookie 有效性
+
+        Returns:
+            dict: {"checked": int, "valid": int, "expired": int, "errors": int}
+        """
+        accounts = self.dao.get_all_accounts()
+        stats = {"checked": 0, "valid": 0, "expired": 0, "errors": 0}
+
+        for account in accounts:
+            # 只检查状态为 ACTIVE 的账号
+            if account["status"] != AccountStatus.ACTIVE.value:
+                continue
+
+            account_id = account["id"]
+            account_name = account["name"]
+            stats["checked"] += 1
+
+            try:
+                if self.auto_login(account_id):
+                    stats["valid"] += 1
+                    logger.info(f"[Cookie轮询] 账号 {account_name} Cookie有效")
+                else:
+                    stats["expired"] += 1
+                    logger.warn(f"[Cookie轮询] 账号 {account_name} Cookie已过期")
+            except Exception as e:
+                stats["errors"] += 1
+                logger.error(f"[Cookie轮询] 账号 {account_name} 检查异常: {e}")
+
+        if stats["checked"] > 0:
+            logger.info(
+                f"[Cookie轮询] 完成 — 检查 {stats['checked']} 个账号, "
+                f"有效 {stats['valid']}, 过期 {stats['expired']}, 异常 {stats['errors']}"
+            )
+        return stats
+
+
+class CookieChecker:
+    """后台 Cookie 轮询检查器"""
+
+    def __init__(self, account_manager: AccountManager):
+        self.account_manager = account_manager
+        self.scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+        self._lock = threading.Lock()
+
+    def start(self, interval_seconds: int = COOKIE_CHECK_INTERVAL_SECONDS):
+        """启动后台轮询"""
+        with self._lock:
+            if self.scheduler.running:
+                return
+            self.scheduler.add_job(
+                self._check,
+                "interval",
+                seconds=interval_seconds,
+                id="cookie_checker",
+                replace_existing=True,
+                next_run_time=None,  # 不立即执行，等间隔后再检查
+            )
+            self.scheduler.start()
+            logger.info(f"[Cookie轮询] 已启动，间隔 {interval_seconds} 秒")
+
+    def stop(self):
+        """停止轮询"""
+        with self._lock:
+            if self.scheduler.running:
+                self.scheduler.shutdown(wait=False)
+                logger.info("[Cookie轮询] 已停止")
+
+    def _check(self):
+        """执行一次检查"""
+        try:
+            self.account_manager.check_all_accounts_cookies()
+        except Exception as e:
+            logger.error(f"[Cookie轮询] 执行异常: {e}")

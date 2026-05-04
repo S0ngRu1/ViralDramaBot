@@ -121,7 +121,7 @@ class Uploader:
 
     def _navigate_to_create(self, page: ChromiumPage):
         """导航到视频发布页面"""
-        logger.info("正在打开发布页面...")
+        logger.info("正在打开发表页面...")
         page.get(WeixinConfig.POST_CREATE_URL)
         self._random_delay(3, 5)
 
@@ -233,16 +233,15 @@ class Uploader:
         """填写描述、标签、短标题、剧集链接"""
         logger.info("正在填写视频信息...")
 
-        # 填写描述（不包含标签，标签通过单独的按钮添加）
-        if metadata.description:
-            self._fill_description(page, metadata.description)
-            self._random_delay(0.5, 1)
-
-        # 通过 #话题 按钮添加真实标签
+        # 将标签追加到描述末尾（格式：#标签1 #标签2）
+        description = metadata.description or ""
         if metadata.tags:
-            for tag in metadata.tags[:5]:
-                self._add_tag(page, tag)
-                self._random_delay(0.3, 0.5)
+            tag_str = " ".join(f"#{tag}" for tag in metadata.tags[:5])
+            description = f"{description}\n{tag_str}" if description else tag_str
+
+        if description:
+            self._fill_description(page, description)
+            self._random_delay(0.5, 1)
 
         # 添加剧集链接
         if drama_link:
@@ -559,10 +558,10 @@ class Uploader:
 
     def _set_schedule_time(self, page: ChromiumPage, scheduled_at: datetime):
         """设置定时发布时间"""
-        logger.info(f"设置定时发布: {scheduled_at}")
+        logger.info(f"设置定时发表: {scheduled_at}")
 
-        # 点击定时发布选项
-        schedule_option = page.ele("text:定时发布", timeout=5)
+        # 点击定时发表选项
+        schedule_option = page.ele("text:定时发表", timeout=5)
         if schedule_option:
             schedule_option.click()
             self._random_delay(0.5, 1)
@@ -583,28 +582,32 @@ class Uploader:
             self._random_delay(0.5, 1)
 
     def _click_publish(self, page: ChromiumPage):
-        """点击发布按钮"""
-        logger.info("正在发布...")
-        # 视频号的发布按钮选择器
-        publish_selectors = [
-            "css:.weui-desktop-btn_primary:contains('发布')",
-            "css:button.weui-desktop-btn_primary",
-            "text:发布",
-        ]
-        for selector in publish_selectors:
+        """点击发表按钮"""
+        logger.info("正在发表...")
+        # 等待按钮可用（视频处理完成后才可点击），最多等 60 秒
+        for attempt in range(30):
             try:
-                publish_btn = page.ele(selector, timeout=3)
-                if publish_btn and publish_btn.attr("disabled") is None:
-                    publish_btn.click()
-                    logger.info("已点击发布按钮")
-                    self._random_delay(1, 2)
-                    return
+                # 遍历所有 primary 按钮，找到文本为"发表"且未禁用的
+                buttons = page.eles("css:.weui-desktop-btn_primary", timeout=2)
+                for btn in buttons:
+                    if btn.text.strip() == "发表":
+                        btn_class = btn.attr("class") or ""
+                        if "disabled" not in btn_class:
+                            btn.click()
+                            logger.info("已点击发表按钮")
+                            self._random_delay(1, 2)
+                            return
+                        else:
+                            if attempt % 5 == 0:
+                                logger.info(f"发表按钮暂不可用，等待中... ({attempt + 1}/30)")
+                            break
             except Exception:
-                continue
-        raise Exception("未找到可用的发布按钮")
+                pass
+            self._random_delay(1, 2)
+        raise Exception("未找到可用的发表按钮（等待超时）")
 
     def _confirm_publish(self, page: ChromiumPage):
-        """确认发布（处理可能的确认弹窗）"""
+        """确认发表（处理可能的确认弹窗）"""
         self._random_delay(1, 2)
 
         # 检查是否有确认弹窗
@@ -613,40 +616,40 @@ class Uploader:
             "css:.weui-desktop-btn_primary:contains('确认')",
             "css:.weui-desktop-btn_primary:contains('继续')",
             "text:确定",
-            "text:确认发布",
-            "text:继续发布",
+            "text:确认发表",
+            "text:继续发表",
         ]
         for selector in confirm_selectors:
             try:
                 confirm_btn = page.ele(selector, timeout=2)
                 if confirm_btn:
                     confirm_btn.click()
-                    logger.info("已确认发布")
+                    logger.info("已确认发表")
                     self._random_delay(1, 2)
                     break
             except Exception:
                 continue
 
-        # 等待发布成功
+        # 等待发表成功
         success_indicators = [
-            "text:发布成功",
-            "text:已发布",
+            "text:发表成功",
+            "text:已发表",
             "css:.weui-desktop-toast:contains('成功')",
         ]
         for selector in success_indicators:
             try:
                 success = page.ele(selector, timeout=5)
                 if success:
-                    logger.info("发布成功")
+                    logger.info("发表成功")
                     return
             except Exception:
                 continue
 
         # 检查是否已跳转到作品管理页面
         if "post/list" in page.url or "content" in page.url:
-            logger.info("已跳转到作品管理页面，发布可能成功")
+            logger.info("已跳转到作品管理页面，发表可能成功")
         else:
-            logger.warning("未检测到明确的发布成功状态")
+            logger.warning("未检测到明确的发表成功状态")
 
     def _load_cookies(self, page: ChromiumPage, cookie_path: str):
         """加载 Cookie"""
