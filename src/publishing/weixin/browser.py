@@ -115,12 +115,7 @@ class BrowserPool:
 browser_pool = BrowserPool()
 
 
-def get_browser_for_account(account_cookie_path: str) -> ChromiumPage:
-    """
-    为指定账号创建独立的浏览器实例（不使用池）
-
-    用于首次扫码登录等需要独立浏览器的场景
-    """
+def _chromium_options_with_profile(user_data_dir: str) -> ChromiumOptions:
     options = ChromiumOptions()
     if WeixinConfig.BROWSER_PATH:
         options.set_browser_path(WeixinConfig.BROWSER_PATH)
@@ -130,10 +125,41 @@ def get_browser_for_account(account_cookie_path: str) -> ChromiumPage:
     options.set_argument("--disable-blink-features=AutomationControlled")
     options.set_argument("--disable-infobars")
     options.set_argument("--no-sandbox")
-    # 使用独立的用户数据目录实现会话隔离
+    # Edge：自动化使用的独立 user-data-dir 常被当成「新配置」，易弹出「在所有设备上同步浏览数据」等引导。
+    # 以下为 Chromium 通用开关，可减轻（未必完全消除）；仍出现时请在 Edge「设置 → 个人资料」对该配置文件退出登录。
+    options.set_argument("--no-first-run")
+    options.set_argument("--disable-sync")
+    options.set_argument("--disable-default-apps")
+    options.set_user_data_path(user_data_dir)
+    # 默认未开启时多个 ChromiumPage 可能争用同一调试端口，后起的会顶替前一个窗口。
+    options.auto_port(True)
+    return options
+
+
+def get_browser_for_account(account_cookie_path: str) -> ChromiumPage:
+    """
+    为指定账号创建独立的浏览器实例（不使用池）
+
+    用于首次扫码登录等需要独立浏览器的场景
+    """
+    # 使用独立的用户数据目录实现会话隔离（上传 / 扫码）
     user_data_dir = str(
         WeixinConfig.COOKIES_DIR / f"profile_{hash(account_cookie_path)}"
     )
-    options.set_user_data_path(user_data_dir)
-    page = ChromiumPage(options)
+    page = ChromiumPage(_chromium_options_with_profile(user_data_dir))
     return page
+
+
+def get_browser_for_channels_viewer(account_id: int) -> ChromiumPage:
+    """
+    「视频管理页」等前台浏览：每个账号固定一个 viewer 目录（不随点击无限增长）。
+
+    使用独立 user-data-dir（viewer/account_*）且与上传用的 profile_* 分离；配合 auto_port，
+    一般可与同一账号的上传任务并行（上传一个 Edge、viewer 再开一个 Edge）。
+    登录态通过 Cookie 文件注入（调用方负责 load_cookies）。
+    若在未关闭 viewer 的情况下再次点击「视频管理页」，同一 viewer 目录可能被占用导致启动失败，需先关掉已有 viewer 窗口。
+    """
+    WeixinConfig.ensure_dirs()
+    viewer_dir = WeixinConfig.COOKIES_DIR / "viewer" / f"account_{account_id}"
+    viewer_dir.mkdir(parents=True, exist_ok=True)
+    return ChromiumPage(_chromium_options_with_profile(str(viewer_dir)))

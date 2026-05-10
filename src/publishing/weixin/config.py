@@ -12,6 +12,7 @@ class WeixinConfig:
     # 视频号创作者中心 URL
     CHANNELS_URL = "https://channels.weixin.qq.com"
     POST_CREATE_URL = f"{CHANNELS_URL}/platform/post/create"
+    POST_LIST_URL = f"{CHANNELS_URL}/platform/post/list"
     LOGIN_URL = f"{CHANNELS_URL}/login.html?from=assistant"
 
     # 数据目录
@@ -30,6 +31,10 @@ class WeixinConfig:
     OPERATION_DELAY_MAX = 2.0  # 操作间最大延迟（秒）
 
     # 上传配置
+    # 同时进行的上传任务数（跨账号全局）。DrissionPage 每任务会启独立浏览器，
+    # 多实例并发易导致调试端口/进程互斥，后启动的任务会打断前一个，表现为「抢占」。
+    # 默认 1 表示全局串行上传；机器强劲且已验证可多开时再改为 2+。
+    MAX_CONCURRENT_UPLOADS = max(1, int(os.getenv("WEIXIN_MAX_CONCURRENT_UPLOADS", "1")))
     MAX_RETRIES = 3  # 最大重试次数
     MAX_ACCOUNTS = 50  # 最大账号数
     SUPPORTED_VIDEO_FORMATS = [".mp4", ".mov", ".avi", ".mkv", ".flv", ".wmv"]

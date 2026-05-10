@@ -237,6 +237,15 @@ const api = {
         }
     },
 
+    openWeixinPostList: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/${id}/open-post-list`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     deleteWeixinAccount: async (id) => {
         try {
             const response = await axios.delete(`${API_BASE_URL}/weixin/accounts/${id}`);
@@ -1354,6 +1363,9 @@ app.component('weixin-page', {
                                             <span v-if="refreshingIds.has(acc.id)"><span class="spinner"></span> 刷新中</span>
                                             <span v-else>刷新</span>
                                         </button>
+                                        <button class="btn btn-secondary btn-small" @click="openWeixinPostList(acc.id)" title="使用与自动上传相同的 Chromium 打开视频列表（请勿在上传中重复点击）">
+                                            视频管理页
+                                        </button>
                                         <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)">删除</button>
                                     </div>
                                 </td>
@@ -1402,12 +1414,8 @@ app.component('weixin-page', {
                     </div>
                     <div v-if="uploadForm.metadata_source === 'manual'">
                         <div class="form-group">
-                            <label>标题</label>
-                            <input v-model="uploadForm.title" type="text" placeholder="视频标题（最多50字）" maxlength="50">
-                        </div>
-                        <div class="form-group">
-                            <label>描述</label>
-                            <textarea v-model="uploadForm.description" placeholder="视频描述"></textarea>
+                            <label>视频描述</label>
+                            <textarea v-model="uploadForm.description" placeholder="视频描述" rows="4"></textarea>
                         </div>
                         <div class="form-group">
                             <label>标签（用逗号分隔）</label>
@@ -1474,6 +1482,10 @@ app.component('weixin-page', {
                         <input v-model="batchForm.tagsStr" type="text" placeholder="标签1, 标签2">
                     </div>
                     <div class="form-group">
+                        <label>视频描述（所有视频共用，可选）</label>
+                        <textarea v-model="batchForm.descriptionStr" placeholder="填写后每个任务都会带上该描述；留空则仅按「元数据来源」自动填充描述" rows="3"></textarea>
+                    </div>
+                    <div class="form-group">
                         <label>剧集链接（可选）</label>
                         <input v-model="batchForm.drama_link" type="text" placeholder="输入视频号剧集名称">
                     </div>
@@ -1504,7 +1516,7 @@ app.component('weixin-page', {
                                 <th>ID</th>
                                 <th>账号</th>
                                 <th>视频</th>
-                                <th>标题</th>
+                                <th>描述</th>
                                 <th>状态</th>
                                 <th>创建时间</th>
                                 <th>操作</th>
@@ -1515,7 +1527,7 @@ app.component('weixin-page', {
                                 <td>{{ task.id }}</td>
                                 <td>{{ getAccountName(task.account_id) }}</td>
                                 <td>{{ getFileName(task.video_path) }}</td>
-                                <td>{{ task.title || '-' }}</td>
+                                <td class="truncate" :title="task.description || task.title || '-'">{{ task.description || task.title || '-' }}</td>
                                 <td><span :class="'badge badge-' + getTaskStatusClass(task.status)">{{ getTaskStatusText(task.status) }}</span></td>
                                 <td>{{ formatDate(task.created_at) }}</td>
                                 <td>
@@ -1637,11 +1649,11 @@ app.component('weixin-page', {
         const message = reactive({ show: false, type: 'info', text: '' });
 
         const uploadForm = reactive({
-            account_id: '', video_path: '', title: '', description: '',
+            account_id: '', video_path: '', description: '',
             tagsStr: '', metadata_source: 'manual', scheduled_at: '', drama_link: ''
         });
         const batchForm = reactive({
-            account_id: '', videoFiles: [], tagsStr: '', metadata_source: 'manual', drama_link: ''
+            account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual', drama_link: ''
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -1662,6 +1674,16 @@ app.component('weixin-page', {
 
         function getFileName(p) {
             return p ? p.split(/[/\\\\]/).pop() : '-';
+        }
+
+        async function openWeixinPostList(accountId) {
+            try {
+                const res = await props.api.openWeixinPostList(accountId);
+                showMessage(res.message || '正在打开浏览器…', 'info');
+            } catch (e) {
+                const msg = typeof e === 'object' && e?.detail ? e.detail : (e.message || String(e));
+                showMessage('打开失败: ' + msg, 'error');
+            }
         }
 
         function getAccountName(id) {
@@ -1814,7 +1836,7 @@ app.component('weixin-page', {
                 const payload = {
                     account_id: parseInt(uploadForm.account_id),
                     video_path: uploadForm.video_path,
-                    title: uploadForm.title || null,
+                    title: null,
                     description: uploadForm.description || null,
                     tags: tags.length ? tags : null,
                     metadata_source: uploadForm.metadata_source,
@@ -1824,7 +1846,6 @@ app.component('weixin-page', {
                 const res = await props.api.createWeixinUpload(payload);
                 showMessage(res.message || '任务已创建', 'success');
                 uploadForm.video_path = '';
-                uploadForm.title = '';
                 uploadForm.description = '';
                 uploadForm.tagsStr = '';
                 uploadForm.scheduled_at = '';
@@ -1841,9 +1862,14 @@ app.component('weixin-page', {
                     return;
                 }
                 const tags = batchForm.tagsStr ? batchForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
+                const descTrim = (batchForm.descriptionStr || '').trim();
+                const descriptions = descTrim
+                    ? batchForm.videoFiles.map(() => descTrim)
+                    : null;
                 const res = await props.api.createWeixinBatchUpload({
                     account_id: parseInt(batchForm.account_id),
                     video_paths: batchForm.videoFiles,
+                    descriptions,
                     tags: tags.length ? tags : null,
                     metadata_source: batchForm.metadata_source,
                     drama_link: batchForm.drama_link || null,
@@ -1851,6 +1877,7 @@ app.component('weixin-page', {
                 showMessage('批量任务已创建，共 ' + res.total + ' 个', 'success');
                 batchForm.videoFiles = [];
                 batchForm.tagsStr = '';
+                batchForm.descriptionStr = '';
                 batchForm.drama_link = '';
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
@@ -1927,7 +1954,7 @@ app.component('weixin-page', {
             formatDate, getFileName, getAccountName,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
             loadAccounts, loadTasks, loadSchedules,
-            addAccount, loginAccount, refreshAccount, deleteAccount,
+            addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
             browseUploadFile, browseBatchFiles, removeBatchFile,
             createUploadTask, createBatchUpload,
             retryTask, deleteTask,

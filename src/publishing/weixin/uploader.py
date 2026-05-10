@@ -7,6 +7,7 @@
 import json
 import random
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,9 @@ from .dao import WeixinDAO
 from .metadata import MetadataResolver, VideoMetadata
 from .schemas import AccountStatus, TaskStatus
 from src.core.logger import logger
+
+# 全局上传并发闸门：避免多个 BackgroundTasks 同时跑 upload_video 导致多浏览器实例互相抢占。
+_upload_slot = threading.BoundedSemaphore(WeixinConfig.MAX_CONCURRENT_UPLOADS)
 
 
 class Uploader:
@@ -81,6 +85,8 @@ class Uploader:
 
         logger.info(f"开始上传任务 #{task_id}: {video_file.name} → 账号 {account['name']}")
 
+        _upload_slot.acquire()
+        page = None
         try:
             page = get_browser_for_account(account["cookie_path"])
             self._load_cookies(page, account["cookie_path"])
@@ -111,13 +117,21 @@ class Uploader:
             self._save_cookies(page, account["cookie_path"])
 
             page.quit()
+            page = None
             self.dao.update_task_status(task_id, TaskStatus.COMPLETED)
             logger.info(f"任务 #{task_id} 上传成功")
             return {"status": "success", "message": "上传成功"}
 
         except Exception as e:
             logger.error(f"任务 #{task_id} 上传失败: {e}")
+            if page is not None:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
             return self._fail_task(task_id, str(e))
+        finally:
+            _upload_slot.release()
 
     def _navigate_to_create(self, page: ChromiumPage):
         """导航到视频发布页面"""
@@ -432,12 +446,716 @@ class Uploader:
         except Exception as e:
             logger.warning(f"添加标签失败: {e}")
 
+    def _scroll_click_element(self, page: ChromiumPage, ele) -> bool:
+        """滚动到视口内再点击；对文本节点会沿父链多点几次。"""
+        if not ele:
+            return False
+        chain = [ele]
+        cur = ele
+        for _ in range(6):
+            try:
+                cur = cur.parent()
+                if cur:
+                    chain.append(cur)
+            except Exception:
+                break
+        for target in chain:
+            try:
+                page.run_js(
+                    "arguments[0].scrollIntoView({block:'center',inline:'nearest'});",
+                    target,
+                )
+            except Exception:
+                pass
+            self._random_delay(0.08, 0.18)
+            try:
+                target.click()
+                return True
+            except Exception:
+                pass
+            try:
+                page.run_js(
+                    "arguments[0].dispatchEvent(new MouseEvent('click',"
+                    "{bubbles:true,cancelable:true,view:window}));",
+                    target,
+                )
+                return True
+            except Exception:
+                pass
+            try:
+                page.run_js("arguments[0].click&&arguments[0].click();", target)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _try_js_click_link_option_video_series(self, page: ChromiumPage) -> bool:
+        """用页面内脚本点击「视频号剧集」整行（避免点到无尺寸文本节点）。"""
+        js = r"""
+        (function () {
+          var selectors = [
+            '.link-list-options .link-option-item',
+            '[class*="link-option"]',
+            '[class*="LinkOption"]',
+            '.weui-desktop-dropdown__list-box > *',
+            '[role="menu"] [role="menuitem"]',
+            '[role="listbox"] [role="option"]'
+          ];
+          var seen = new Set();
+          var cand = [];
+          selectors.forEach(function (sel) {
+            try {
+              document.querySelectorAll(sel).forEach(function (el) {
+                if (!seen.has(el)) { seen.add(el); cand.push(el); }
+              });
+            } catch (e) {}
+          });
+          for (var i = 0; i < cand.length; i++) {
+            var el = cand[i];
+            var t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!t) continue;
+            if (t.indexOf('小程序短剧') >= 0 && t.indexOf('视频号剧集') < 0) continue;
+            if (t.indexOf('小程序') >= 0 && t.indexOf('短剧') >= 0 && t.indexOf('视频号剧集') < 0) continue;
+            if (t.indexOf('视频号剧集') >= 0) {
+              el.scrollIntoView({ block: 'center', inline: 'nearest' });
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        }})();
+        """
+        try:
+            return bool(page.run_js(js))
+        except Exception:
+            return False
+
+    def _find_link_option_row_video_series(self, page: ChromiumPage):
+        """定位链接类型列表里「视频号剧集」所在的可点击行。"""
+        row_selectors = [
+            "css:.link-list-options .link-option-item",
+            "css:.link-option-item",
+            "css:.link-list-options li",
+            "css:[class*='link-option-item']",
+            "xpath://*[contains(@class,'link-option-item')][contains(.,'视频号剧集')]",
+            "xpath://*[contains(@class,'LinkOption')][contains(.,'视频号剧集')]",
+            "xpath://li[contains(.,'视频号剧集')]",
+        ]
+        for sel in row_selectors:
+            try:
+                rows = page.eles(sel, timeout=2) or []
+            except Exception:
+                continue
+            for row in rows:
+                try:
+                    t = (row.text or "").replace("\n", " ").strip()
+                except Exception:
+                    t = ""
+                if not t:
+                    continue
+                if "小程序短剧" in t and "视频号剧集" not in t:
+                    continue
+                if "小程序" in t and "短剧" in t and "视频号剧集" not in t:
+                    continue
+                if "视频号剧集" in t:
+                    return row
+        return None
+
+    def _try_js_click_picker_placeholder(self, page: ChromiumPage) -> bool:
+        """点击「选择需要添加的视频号剧集」（源码: .post-component-choose-wrap span.placeholder）。"""
+        js = r"""
+        (function () {
+          var wrap = document.querySelector('.post-component-choose-wrap');
+          if (wrap) {
+            var ph = wrap.querySelector('.placeholder') || wrap.querySelector('.content-wrap');
+            if (ph) {
+              var t = (ph.innerText || ph.textContent || '').trim();
+              if (t.indexOf('选择需要添加') >= 0 || t.indexOf('选择需要关联') >= 0 || t.indexOf('视频号剧集') >= 0) {
+                ph.scrollIntoView({ block: 'center' });
+                ph.click();
+                return true;
+              }
+              ph.scrollIntoView({ block: 'center' });
+              ph.click();
+              return true;
+            }
+            wrap.scrollIntoView({ block: 'center' });
+            wrap.click();
+            return true;
+          }
+          var nodes = document.querySelectorAll(
+            'button, a, div[role="button"], span.placeholder, span, [class*="placeholder"]'
+          );
+          for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            var t = (el.innerText || el.textContent || '').trim();
+            if ((t.indexOf('选择需要添加') >= 0 || t.indexOf('选择需要关联') >= 0) && t.indexOf('视频号剧集') >= 0) {
+              el.scrollIntoView({ block: 'center' });
+              el.click();
+              return true;
+            }
+          }
+          return false;
+        }})();
+        """
+        try:
+            return bool(page.run_js(js))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _dialog_root_from_element(ele) -> Optional[object]:
+        """向上查找包含 dialog-wrap 的容器。"""
+        if not ele:
+            return None
+        cur = ele
+        for _ in range(28):
+            try:
+                cls = cur.attr("class") or ""
+                if isinstance(cls, str) and "dialog-wrap" in cls:
+                    return cur
+                cur = cur.parent()
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _row_inside_ant_table(row) -> bool:
+        try:
+            cur = row
+            for _ in range(12):
+                if not cur:
+                    break
+                cls = cur.attr("class") or ""
+                if isinstance(cls, str) and "ant-table" in cls:
+                    return True
+                cur = cur.parent()
+        except Exception:
+            pass
+        return False
+
+    def _confirm_native_drama_dialog(self, page: ChromiumPage) -> None:
+        """点击剧集弹层底部的「添加」按钮（通过 dialog 标题定位，不检查可见性）。"""
+        btn_selectors = (
+            "xpath://h3[contains(.,'视频号剧集')]"
+            "/ancestor::div[contains(@class,'weui-desktop-dialog')]//button[contains(@class,'weui-desktop-btn_primary')]",
+            "xpath://h3[contains(.,'选择需要关联')]"
+            "/ancestor::div[contains(@class,'weui-desktop-dialog')]//button[contains(@class,'weui-desktop-btn_primary')]",
+        )
+        for sel in btn_selectors:
+            try:
+                btn = page.ele(sel, timeout=2)
+                if not btn:
+                    continue
+                tx = (btn.text or "").strip()
+                if tx not in ("确定", "确认", "添加"):
+                    continue
+                cls = btn.attr("class") or ""
+                if isinstance(cls, str) and "disabled" in cls:
+                    continue
+                self._scroll_click_element(page, btn)
+                logger.info(f"已点击剧集弹层按钮: {tx}")
+                return
+            except Exception:
+                continue
+
+    def _check_browser_alive(self, page: ChromiumPage) -> None:
+        """检测浏览器是否已关闭，若已关闭则抛出异常。"""
+        try:
+            page.run_js("return 1")
+        except Exception as e:
+            raise Exception(f"浏览器已关闭: {e}")
+
+    def _find_drama_dialog_search_input(self, page: ChromiumPage):
+        """
+        通过标题文本定位剧集弹层里的搜索框。
+        微信页面会把弹层浮在发表页之上，根节点不一定正好是 .weui-desktop-dialog。
+        """
+        # 用 JS 从「选择需要关联的视频号剧集」标题反查浮层容器，再给搜索 input 打标。
+        js = r"""
+        (function () {
+          document.querySelectorAll('input[data-vd-drama-search]').forEach(function (el) {
+            el.removeAttribute('data-vd-drama-search');
+          });
+
+          function text(el) {
+            return ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+          }
+
+          function isUsableInput(el, allowHidden) {
+            if (!el || el.disabled || el.readOnly) return false;
+            var ph = el.getAttribute('placeholder') || '';
+            if (ph.indexOf('小游戏') >= 0 || ph.indexOf('小说') >= 0) return false;
+            var rect = el.getBoundingClientRect();
+            return allowHidden || (rect.width > 0 && rect.height > 0);
+          }
+
+          function hasDramaPickerContent(el) {
+            return !!(el && el.querySelector(
+              '.drama-table-wrap,tr.drama-row,tbody tr.ant-table-row,.drama-title,input[placeholder="搜索内容"]'
+            ));
+          }
+
+          function isVisible(el) {
+            if (!el) return false;
+            var style = el.ownerDocument.defaultView.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }
+
+          function markActiveDramaPaneInput(root) {
+            var panes = root.querySelectorAll('.dialog-wrap');
+            for (var p = panes.length - 1; p >= 0; p--) {
+              var pane = panes[p];
+              if (!isVisible(pane)) continue;
+              if (!pane.querySelector('.drama-table-wrap,tr.drama-row,.drama-title')) continue;
+              var input = pane.querySelector('input.weui-desktop-form__input[placeholder="搜索内容"],input[placeholder="搜索内容"]');
+              if (isUsableInput(input, false)) {
+                input.setAttribute('data-vd-drama-search', '1');
+                return true;
+              }
+            }
+            return false;
+          }
+
+          function findRoot(title) {
+            var cur = title ? title.parentElement : null;
+            for (var i = 0; i < 14 && cur; i++) {
+              var cls = cur.className || '';
+              if (typeof cls !== 'string') cls = '';
+              if (
+                cls.indexOf('weui-desktop-dialog') >= 0 ||
+                cls.indexOf('dialog') >= 0 ||
+                cls.indexOf('modal') >= 0 ||
+                cur.getAttribute('role') === 'dialog'
+              ) {
+                if (hasDramaPickerContent(cur)) return cur;
+              }
+              cur = cur.parentElement;
+            }
+            return title.parentElement || document.body;
+          }
+
+          function markInput(root) {
+            if (markActiveDramaPaneInput(root)) return true;
+            var selectors = [
+              'input.weui-desktop-form__input[placeholder="搜索内容"]',
+              'input[placeholder="搜索内容"]',
+              'input.weui-desktop-form__input[placeholder*="搜索"]',
+              'input[placeholder*="搜索"]',
+              'input[placeholder*="短剧"]'
+            ];
+            var hiddenExact = null;
+            for (var s = 0; s < selectors.length; s++) {
+              var inputs = root.querySelectorAll(selectors[s]);
+              for (var i = 0; i < inputs.length; i++) {
+                if (isUsableInput(inputs[i], false)) {
+                  inputs[i].setAttribute('data-vd-drama-search', '1');
+                  return true;
+                }
+                if (
+                  !hiddenExact &&
+                  inputs[i] &&
+                  (inputs[i].getAttribute('placeholder') || '') === '搜索内容' &&
+                  isUsableInput(inputs[i], true)
+                ) {
+                  hiddenExact = inputs[i];
+                }
+              }
+            }
+            // 微信页面源码里剧集弹层的 active pane 有时仍保留 display:none，
+            // 这种情况下 rect 为 0，但精确 placeholder 仍是后续 Vue 搜索绑定的输入框。
+            if (hiddenExact) {
+              hiddenExact.setAttribute('data-vd-drama-search', '1');
+              return true;
+            }
+            return false;
+          }
+
+          function markBestGlobalInput() {
+            var exactInputs = document.querySelectorAll(
+              'input.weui-desktop-form__input[placeholder="搜索内容"],input[placeholder="搜索内容"]'
+            );
+            var hiddenExact = null;
+            for (var e = 0; e < exactInputs.length; e++) {
+              if (isUsableInput(exactInputs[e], false)) {
+                exactInputs[e].setAttribute('data-vd-drama-search', '1');
+                return true;
+              }
+              if (!hiddenExact && isUsableInput(exactInputs[e], true)) {
+                hiddenExact = exactInputs[e];
+              }
+            }
+            if (hiddenExact) {
+              hiddenExact.setAttribute('data-vd-drama-search', '1');
+              return true;
+            }
+            return false;
+          }
+
+          if (markActiveDramaPaneInput(document)) return true;
+
+          var titles = document.querySelectorAll(
+            'h1,h2,h3,h4,.weui-desktop-dialog__title,[class*="dialog__title"],[class*="dialog-title"]'
+          );
+          for (var t = 0; t < titles.length; t++) {
+            var titleText = text(titles[t]);
+            if (titleText.indexOf('视频号剧集') < 0) continue;
+            if (titleText.indexOf('选择需要关联') < 0 && titleText.indexOf('选择需要添加') < 0) continue;
+            if (markInput(findRoot(titles[t]))) return true;
+          }
+
+          var dialogs = document.querySelectorAll(
+            '.weui-desktop-dialog,[class*="weui-desktop-dialog"],[role="dialog"],[class*="dialog"],[class*="modal"]'
+          );
+          for (var d = 0; d < dialogs.length; d++) {
+            if (text(dialogs[d]).indexOf('视频号剧集') < 0) continue;
+            if (markInput(dialogs[d])) return true;
+          }
+
+          if (markBestGlobalInput()) return true;
+
+          return false;
+        })();
+        """
+        try:
+            if not page.run_js(js):
+                return None
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
+                raise
+            return None
+
+        try:
+            el = page.ele("css:input[data-vd-drama-search='1']", timeout=2)
+            return el
+        except Exception:
+            return None
+
+    def _js_search_drama_dialog(self, page: ChromiumPage, drama_query: str) -> bool:
+        """在剧集浮层内直接输入搜索词；覆盖主文档、同源 iframe 和 shadow DOM。"""
+        safe_query = json.dumps((drama_query or "").strip(), ensure_ascii=False)
+        js = f"""
+        (function () {{
+          var query = {safe_query};
+          function text(el) {{
+            return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }}
+          function visible(el) {{
+            if (!el) return false;
+            var style = el.ownerDocument.defaultView.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }}
+          function isDramaSearchInput(el) {{
+            if (!el || el.tagName !== 'INPUT' || el.disabled || el.readOnly) return false;
+            var ph = el.getAttribute('placeholder') || '';
+            if (ph.indexOf('小游戏') >= 0 || ph.indexOf('小说') >= 0) return false;
+            if (visible(el)) return ph === '搜索内容' || ph.indexOf('搜索') >= 0;
+            return ph === '搜索内容';
+          }}
+          function setNativeValue(el, value) {{
+            if (visible(el)) el.focus();
+            var setter = Object.getOwnPropertyDescriptor(el.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+            if (setter) setter.call(el, '');
+            else el.value = '';
+            el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'deleteContentBackward', data: null }}));
+            if (setter) setter.call(el, value);
+            else el.value = value;
+            el.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: value }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            el.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }}));
+            var iconRoot =
+              (el.closest && (el.closest('.dialog-body') || el.closest('.filter-wrap') || el.closest('.search-wrap'))) ||
+              el.parentElement;
+            var icon = iconRoot && iconRoot.querySelector('.search-icon,svg[class*="search"]');
+            if (icon) icon.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, view: el.ownerDocument.defaultView }}));
+          }}
+          function findRootFromTitle(doc) {{
+            var titles = doc.querySelectorAll('h1,h2,h3,h4,.weui-desktop-dialog__title,[class*="dialog__title"],[class*="dialog-title"]');
+            for (var i = titles.length - 1; i >= 0; i--) {{
+              var titleText = text(titles[i]);
+              if (titleText.indexOf('视频号剧集') < 0) continue;
+              if (titleText.indexOf('选择需要关联') < 0 && titleText.indexOf('选择需要添加') < 0) continue;
+              var cur = titles[i].parentElement;
+              for (var depth = 0; depth < 20 && cur; depth++) {{
+                if (cur.querySelector && cur.querySelector('input[placeholder="搜索内容"],input[placeholder*="搜索"],tr.drama-row,.drama-title')) return cur;
+                cur = cur.parentElement;
+              }}
+            }}
+            return null;
+          }}
+          function findInput(doc) {{
+            var panes = doc.querySelectorAll('.dialog-wrap');
+            for (var p = panes.length - 1; p >= 0; p--) {{
+              var pane = panes[p];
+              if (!visible(pane)) continue;
+              if (!pane.querySelector('.drama-table-wrap,tr.drama-row,.drama-title')) continue;
+              var paneInput = pane.querySelector('input.weui-desktop-form__input[placeholder="搜索内容"],input[placeholder="搜索内容"]');
+              if (isDramaSearchInput(paneInput)) return paneInput;
+            }}
+            var roots = [];
+            var root = findRootFromTitle(doc);
+            if (root) roots.push(root);
+            doc.querySelectorAll('.weui-desktop-dialog,[class*="weui-desktop-dialog"],[role="dialog"],[class*="dialog"],[class*="modal"],body').forEach(function (el) {{
+              if (text(el).indexOf('视频号剧集') >= 0 || el === doc.body) roots.push(el);
+            }});
+            for (var r = 0; r < roots.length; r++) {{
+              var inputs = roots[r].querySelectorAll('input.weui-desktop-form__input[placeholder="搜索内容"],input[placeholder="搜索内容"],input[placeholder*="搜索"]');
+              for (var i = 0; i < inputs.length; i++) {{
+                if (isDramaSearchInput(inputs[i])) return inputs[i];
+              }}
+            }}
+            return null;
+          }}
+          function visitDoc(doc, seen) {{
+            if (!doc || seen.indexOf(doc) >= 0) return false;
+            seen.push(doc);
+            var input = findInput(doc);
+            if (input) {{
+              if (visible(input)) input.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+              setNativeValue(input, query);
+              return true;
+            }}
+            var all = doc.querySelectorAll('*');
+            for (var s = 0; s < all.length; s++) {{
+              if (all[s].shadowRoot && visitDoc(all[s].shadowRoot, seen)) return true;
+            }}
+            var frames = doc.querySelectorAll('iframe,frame');
+            for (var f = 0; f < frames.length; f++) {{
+              try {{
+                if (frames[f].contentDocument && visitDoc(frames[f].contentDocument, seen)) return true;
+              }} catch (e) {{}}
+            }}
+            return false;
+          }}
+          return visitDoc(document, []);
+        }})();
+        """
+        try:
+            return bool(page.run_js(js))
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
+                raise
+            logger.warning(f"JS 搜索剧集输入失败: {e}")
+            return False
+
+    def _js_pick_first_drama_row(self, page: ChromiumPage, drama_query: str = "") -> bool:
+        """在剧集表格中点击一行：有剧名关键词则优先匹配 `.drama-title`，否则首条。"""
+        safe_query = json.dumps((drama_query or "").strip(), ensure_ascii=False)
+        js = f"""
+        (function () {{
+          var preferred = {safe_query};
+          function text(el) {{
+            return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }}
+          function normalized(value) {{
+            return (value || '').replace(/[\\s|\\-|·・_《》<>「」【】\\[\\]()（）]/g, '');
+          }}
+          function visible(el) {{
+            if (!el) return false;
+            var style = el.ownerDocument.defaultView.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }}
+          function hasDramaPickerContent(el) {{
+            return !!(el && el.querySelector(
+              'input[placeholder="搜索内容"],input[placeholder*="搜索"],tr.drama-row,tbody tr.ant-table-row,.drama-title'
+            ));
+          }}
+          function findRoot(doc, title) {{
+            var cur = title ? title.parentElement : null;
+            for (var i = 0; i < 20 && cur; i++) {{
+              var cls = cur.className || '';
+              if (typeof cls !== 'string') cls = '';
+              if (
+                cls.indexOf('weui-desktop-dialog') >= 0 ||
+                cls.indexOf('dialog') >= 0 ||
+                cls.indexOf('modal') >= 0 ||
+                cur.getAttribute('role') === 'dialog' ||
+                hasDramaPickerContent(cur)
+              ) {{
+                if (hasDramaPickerContent(cur)) return cur;
+              }}
+              cur = cur.parentElement;
+            }}
+            return doc.body;
+          }}
+          function visitDoc(doc, seen) {{
+            if (!doc || seen.indexOf(doc) >= 0) return false;
+            seen.push(doc);
+            if (pickInDoc(doc)) return true;
+            var all = doc.querySelectorAll('*');
+            for (var s = 0; s < all.length; s++) {{
+              if (all[s].shadowRoot && visitDoc(all[s].shadowRoot, seen)) return true;
+            }}
+            var frames = doc.querySelectorAll('iframe,frame');
+            for (var f = 0; f < frames.length; f++) {{
+              try {{
+                if (frames[f].contentDocument && visitDoc(frames[f].contentDocument, seen)) return true;
+              }} catch (e) {{}}
+            }}
+            return false;
+          }}
+          function pickInDoc(doc) {{
+            var titleNodes = doc.querySelectorAll(
+              'h1,h2,h3,h4,.weui-desktop-dialog__title,[class*="dialog__title"],[class*="dialog-title"]'
+            );
+            var dlg = null;
+            for (var t = titleNodes.length - 1; t >= 0; t--) {{
+              var titleText = text(titleNodes[t]);
+              if (titleText.indexOf('视频号剧集') >= 0) {{ dlg = findRoot(doc, titleNodes[t]); break; }}
+            }}
+            if (!dlg) {{
+              var dialogs = doc.querySelectorAll(
+                '.weui-desktop-dialog,[class*="weui-desktop-dialog"],[role="dialog"],[class*="dialog"],[class*="modal"]'
+              );
+              for (var d = dialogs.length - 1; d >= 0; d--) {{
+                if (text(dialogs[d]).indexOf('视频号剧集') >= 0) {{ dlg = dialogs[d]; break; }}
+              }}
+            }}
+            if (!dlg) dlg = doc.body;
+            var rows = dlg.querySelectorAll('tr.drama-row, tr.ant-table-row.drama-row, tbody tr.ant-table-row');
+            var normalizedPreferred = normalized(preferred);
+            var list = [];
+            for (var j = 0; j < rows.length; j++) {{
+              var el = rows[j];
+              if (!visible(el)) continue;
+              var titleEl = el.querySelector('.drama-title');
+              var rowTitle = titleEl ? titleEl.textContent.trim() : text(el);
+              if (!rowTitle || rowTitle.indexOf('暂无') >= 0) continue;
+              if (rowTitle.replace(/[\\s|\\-]/g, '') === '') continue;
+              list.push({{ el: el, title: rowTitle, normalizedTitle: normalized(rowTitle) }});
+            }}
+            if (preferred) {{
+              for (var k = 0; k < list.length; k++) {{
+                if (
+                  list[k].title.indexOf(preferred) >= 0 ||
+                  (normalizedPreferred && list[k].normalizedTitle.indexOf(normalizedPreferred) >= 0)
+                ) {{
+                  list[k].el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+                  list[k].el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, view: list[k].el.ownerDocument.defaultView }}));
+                  list[k].el.click();
+                  return true;
+                }}
+              }}
+              return false;
+            }}
+            if (list.length > 0) {{
+              list[0].el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+              list[0].el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, view: list[0].el.ownerDocument.defaultView }}));
+              list[0].el.click();
+              return true;
+            }}
+            return false;
+          }}
+          return visitDoc(document, []);
+        }})();
+        """
+        try:
+            return bool(page.run_js(js))
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
+                raise
+            return False
+
+    def _search_and_select_native_drama(self, page: ChromiumPage, drama_name: Optional[str]) -> bool:
+        """
+        在剧集弹层搜索框输入关键词，再选第一条结果行。
+        浏览器关闭时抛出异常而非静默超时。
+        """
+        query = (drama_name or "").strip()
+
+        # 检测浏览器是否存活
+        self._check_browser_alive(page)
+
+        # 等待弹层出现并定位搜索框
+        search_input = None
+        for attempt in range(20):
+            self._check_browser_alive(page)
+            search_input = self._find_drama_dialog_search_input(page)
+            if search_input:
+                break
+            time.sleep(0.3)
+
+        logger.info(f"搜索剧集: {query}, 已定位搜索框: {bool(search_input)}")
+
+        js_search_done = False
+        if query:
+            js_search_done = self._js_search_drama_dialog(page, query)
+            logger.info(f"JS 搜索剧集: {query}, 已触发输入: {js_search_done}")
+            if js_search_done:
+                self._random_delay(1.2, 1.8)
+
+        if search_input and not js_search_done:
+            try:
+                self._scroll_click_element(page, search_input)
+                self._random_delay(0.2, 0.4)
+                try:
+                    search_input.clear()
+                except Exception:
+                    pass
+                if query:
+                    self._human_type(search_input, query)
+                    try:
+                        page.run_js(
+                            """
+                            var el = arguments[0];
+                            var value = arguments[1];
+                            var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            setter.call(el, value);
+                            el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Enter' }));
+                            """,
+                            search_input,
+                            query,
+                        )
+                    except Exception:
+                        pass
+                self._random_delay(1.2, 1.8)
+            finally:
+                try:
+                    page.run_js(
+                        "var n=document.querySelector('input[data-vd-drama-search]');"
+                        "if(n)n.removeAttribute('data-vd-drama-search');"
+                    )
+                except Exception:
+                    pass
+        else:
+            if not search_input and not js_search_done:
+                logger.info("未通过脚本定位剧集搜索框，继续等待剧集列表结果")
+
+        # 循环等待并点击第一条剧集
+        deadline = time.time() + 18.0
+        while time.time() < deadline:
+            self._check_browser_alive(page)
+
+            if self._js_pick_first_drama_row(page, query):
+                disp = query or "（首条结果）"
+                logger.info(f"已选择剧集: {disp}")
+                self._random_delay(0.35, 0.6)
+                self._confirm_native_drama_dialog(page)
+                return True
+
+            time.sleep(0.45)
+
+        if not search_input and not js_search_done:
+            logger.warning("未找到剧集搜索输入框，且未能通过当前列表选择剧集")
+        logger.warning(f"剧集列表未出现可点击行: {query or '(关键词为空)'}")
+        return False
+
     def _add_drama_link(self, page: ChromiumPage, drama_name: str):
-        """添加视频号剧集链接"""
+        """添加视频号剧集链接：选「视频号剧集」→ 点「选择需要关联/添加的视频号剧集」→ 在「搜索内容」中搜索并选择。"""
         try:
             logger.info(f"正在添加剧集链接: {drama_name}")
 
-            # 找到链接区域并点击
             link_wrap = page.ele("css:.post-link-wrap .link-display-wrap", timeout=3)
             if not link_wrap:
                 link_wrap = page.ele("css:.link-display-wrap", timeout=2)
@@ -446,114 +1164,95 @@ class Uploader:
                 logger.warning("未找到链接区域")
                 return
 
-            link_wrap.click()
-            self._random_delay(0.5, 1)
+            if not self._scroll_click_element(page, link_wrap):
+                logger.warning("点击链接区域失败")
+                return
 
-            # 等待链接选项列表出现，查找"视频号剧集"选项
-            drama_option = None
-            option_selectors = [
-                "css:.link-option-item:contains('剧集')",
-                "css:.link-list-options .link-option-item",
-                "css:.link-option-item",
-            ]
+            self._random_delay(0.8, 1.3)
 
-            # 先尝试直接找包含"剧集"文字的选项
+            clicked_series = self._try_js_click_link_option_video_series(page)
+            if clicked_series:
+                logger.info("已通过脚本选择「视频号剧集」")
+            else:
+                drama_option = self._find_link_option_row_video_series(page)
+                if not drama_option:
+                    try:
+                        options_container = page.ele("css:.link-list-options", timeout=2)
+                        if options_container:
+                            page.run_js(
+                                "arguments[0].scrollTop = arguments[0].scrollHeight",
+                                options_container,
+                            )
+                            self._random_delay(0.3, 0.5)
+                        drama_option = self._find_link_option_row_video_series(page)
+                    except Exception:
+                        pass
+
+                if not drama_option:
+                    try:
+                        hint = page.ele("text:视频号剧集", timeout=2)
+                        if hint:
+                            drama_option = hint
+                    except Exception:
+                        drama_option = None
+
+                if not drama_option:
+                    logger.warning("未找到「视频号剧集」选项（已跳过小程序短剧）")
+                    return
+
+                if not self._scroll_click_element(page, drama_option):
+                    logger.warning("选择「视频号剧集」失败")
+                    return
+
+            self._random_delay(0.6, 1)
+
+            # 选类型后出现「选择需要添加的视频号剧集」（.post-component-choose-wrap .placeholder）
+            picker_clicked = False
             try:
-                drama_option = page.ele("text:视频号剧集", timeout=2)
+                if self._try_js_click_picker_placeholder(page):
+                    picker_clicked = True
+                    logger.info("已通过脚本点击剧集选择入口 (.post-component-choose-wrap)")
+                    self._random_delay(0.6, 1)
             except Exception:
                 pass
 
-            if not drama_option:
-                # 遍历所有选项找剧集
-                options = page.eles("css:.link-option-item", timeout=2)
-                for opt in options:
-                    if "剧集" in opt.text:
-                        drama_option = opt
-                        break
-
-            if not drama_option:
-                # 可能需要滚动查看更多选项
-                try:
-                    options_container = page.ele("css:.link-list-options", timeout=2)
-                    if options_container:
-                        page.run_js("arguments[0].scrollTop = arguments[0].scrollHeight", options_container)
-                        self._random_delay(0.3, 0.5)
-                        drama_option = page.ele("text:视频号剧集", timeout=2)
-                except Exception:
-                    pass
-
-            if drama_option:
-                drama_option.click()
-                self._random_delay(0.5, 1)
-
-                # 等待剧集选择弹窗出现
-                # 弹窗中通常有搜索框和剧集列表
-                search_input = None
-                search_selectors = [
-                    "css:.drama-dialog input",
-                    "css:.common-dialog input[type='text']",
-                    "css:.modal input[type='text']",
-                    "css:input[placeholder*='剧集']",
-                    "css:input[placeholder*='搜索']",
-                ]
-                for selector in search_selectors:
+            if not picker_clicked:
+                picker_labels = (
+                    "css:.post-component-choose-wrap .placeholder",
+                    "css:.post-component-choose-wrap .content-wrap",
+                    "css:.link-input-wrap .post-component-choose-wrap .content-wrap",
+                    "text:选择需要关联的视频号剧集",
+                    "text:选择需要添加的视频号剧集",
+                    "text:选择需要关联",
+                    "text:选择需要添加",
+                    "xpath://*[contains(text(),'选择需要关联的视频号剧集')]",
+                    "xpath://*[contains(text(),'选择需要添加的视频号剧集')]",
+                    "xpath://*[contains(text(),'选择需要关联')]",
+                    "xpath://*[contains(text(),'选择需要添加')]",
+                )
+                for picker_sel in picker_labels:
                     try:
-                        search_input = page.ele(selector, timeout=2)
-                        if search_input:
+                        picker = page.ele(picker_sel, timeout=5)
+                        if picker and self._scroll_click_element(page, picker):
+                            picker_clicked = True
+                            logger.info("已点击剧集选择入口（关联/添加视频号剧集）")
+                            self._random_delay(0.6, 1)
                             break
                     except Exception:
                         continue
 
-                if search_input:
-                    # 输入剧集名称搜索
-                    search_input.click()
-                    self._random_delay(0.2, 0.3)
-                    search_input.clear()
-                    self._human_type(search_input, drama_name)
-                    self._random_delay(0.5, 1)
+            if not picker_clicked:
+                logger.info("未找到「选择需要添加的视频号剧集」，尝试在当前层搜索")
 
-                    # 选择第一个匹配的剧集
-                    result_selectors = [
-                        "css:.drama-item:first-child",
-                        "css:.common-option-list-wrap .option-item:first-child",
-                        "css:.ant-select-item:first-child",
-                        "css:.modal .list-item:first-child",
-                    ]
-                    for selector in result_selectors:
-                        try:
-                            result = page.ele(selector, timeout=2)
-                            if result:
-                                result.click()
-                                logger.info(f"已选择剧集: {drama_name}")
-                                self._random_delay(0.3, 0.5)
+            if not self._search_and_select_native_drama(page, drama_name):
+                return
 
-                                # 点击确认按钮
-                                confirm_selectors = [
-                                    "css:.modal .btn-primary:contains('确定')",
-                                    "css:.modal .btn-primary:contains('确认')",
-                                    "css:.dialog .btn-primary",
-                                    "css:.ant-modal .ant-btn-primary",
-                                ]
-                                for confirm_sel in confirm_selectors:
-                                    try:
-                                        confirm_btn = page.ele(confirm_sel, timeout=1)
-                                        if confirm_btn:
-                                            confirm_btn.click()
-                                            logger.info(f"已确认剧集链接: {drama_name}")
-                                            return
-                                    except Exception:
-                                        continue
-                                return
-                        except Exception:
-                            continue
-
-                    logger.warning(f"未找到匹配的剧集: {drama_name}")
-                else:
-                    logger.warning("未找到剧集搜索输入框")
-            else:
-                logger.warning("未找到'视频号剧集'选项")
+            logger.info(f"剧集链接流程已完成: {drama_name or '(首条结果)'}")
 
         except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in ("disconnected", "target closed", "浏览器已关闭", "session", "connection refused")):
+                raise
             logger.warning(f"添加剧集链接失败: {e}")
 
     def _set_schedule_time(self, page: ChromiumPage, scheduled_at: datetime):
@@ -606,11 +1305,19 @@ class Uploader:
             self._random_delay(1, 2)
         raise Exception("未找到可用的发表按钮（等待超时）")
 
+    def _is_post_list_url(self, url: str) -> bool:
+        """发表成功后站点会跳转到作品列表页。"""
+        if not url:
+            return False
+        return (
+            "channels.weixin.qq.com" in url
+            and "/platform/post/list" in url
+        )
+
     def _confirm_publish(self, page: ChromiumPage):
-        """确认发表（处理可能的确认弹窗）"""
+        """确认发表（处理可能的确认弹窗），成功以跳转到作品列表页为准。"""
         self._random_delay(1, 2)
 
-        # 检查是否有确认弹窗
         confirm_selectors = [
             "css:.weui-desktop-btn_primary:contains('确定')",
             "css:.weui-desktop-btn_primary:contains('确认')",
@@ -619,37 +1326,31 @@ class Uploader:
             "text:确认发表",
             "text:继续发表",
         ]
-        for selector in confirm_selectors:
-            try:
-                confirm_btn = page.ele(selector, timeout=2)
-                if confirm_btn:
-                    confirm_btn.click()
-                    logger.info("已确认发表")
-                    self._random_delay(1, 2)
-                    break
-            except Exception:
-                continue
 
-        # 等待发表成功
-        success_indicators = [
-            "text:发表成功",
-            "text:已发表",
-            "css:.weui-desktop-toast:contains('成功')",
-        ]
-        for selector in success_indicators:
-            try:
-                success = page.ele(selector, timeout=5)
-                if success:
-                    logger.info("发表成功")
-                    return
-            except Exception:
-                continue
+        # 发表后应自动跳转到 https://channels.weixin.qq.com/platform/post/list
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if self._is_post_list_url(page.url):
+                logger.info(f"已跳转至作品列表，发表成功: {page.url}")
+                return
 
-        # 检查是否已跳转到作品管理页面
-        if "post/list" in page.url or "content" in page.url:
-            logger.info("已跳转到作品管理页面，发表可能成功")
-        else:
-            logger.warning("未检测到明确的发表成功状态")
+            for selector in confirm_selectors:
+                try:
+                    confirm_btn = page.ele(selector, timeout=1)
+                    if confirm_btn:
+                        confirm_btn.click()
+                        logger.info("已确认发表弹窗")
+                        self._random_delay(1, 2)
+                        break
+                except Exception:
+                    continue
+
+            self._random_delay(0.5, 1.0)
+
+        raise Exception(
+            "发表后未跳转到作品列表页面 "
+            f"({WeixinConfig.POST_LIST_URL})，当前 URL: {page.url!r}"
+        )
 
     def _load_cookies(self, page: ChromiumPage, cookie_path: str):
         """加载 Cookie"""

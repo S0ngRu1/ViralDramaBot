@@ -13,7 +13,7 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from DrissionPage import ChromiumPage
 
-from .browser import get_browser_for_account
+from .browser import get_browser_for_account, get_browser_for_channels_viewer
 from .config import WeixinConfig
 from DrissionPage import ChromiumOptions
 from .dao import WeixinDAO
@@ -152,6 +152,35 @@ class AccountManager:
             return {"status": "success", "message": "登录状态正常", "need_relogin": False}
         else:
             return {"status": "expired", "message": "Cookie 已过期，需重新登录", "need_relogin": True}
+
+    def open_channels_post_list(self, account_id: int) -> dict:
+        """
+        打开「视频」列表页：使用临时用户数据目录 + 注入已保存 Cookie。
+        不与上传/扫码共用 profile，避免新开浏览器顶掉当前正在使用的窗口。
+        """
+        account = self.dao.get_account(account_id)
+        if not account:
+            raise ValueError(f"账号不存在: {account_id}")
+
+        cookie_path = account["cookie_path"]
+        if not Path(cookie_path).exists():
+            return {"status": "failed", "message": "Cookie 文件不存在，请先扫码登录"}
+
+        page = None
+        try:
+            page = get_browser_for_channels_viewer(account_id)
+            self._load_cookies(page, cookie_path)
+            page.get(WeixinConfig.POST_LIST_URL)
+            logger.info(f"已打开视频管理页（独立 viewer 会话）: {account['name']}")
+            return {"status": "success", "message": "已打开浏览器"}
+        except Exception as e:
+            logger.error(f"打开视频管理页失败: {e}")
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
+            return {"status": "error", "message": str(e)}
 
     def get_account(self, account_id: int) -> Optional[dict]:
         """获取账号信息"""

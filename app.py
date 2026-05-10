@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from threading import Lock, Thread
 
 from contextlib import asynccontextmanager
 
@@ -1167,6 +1167,34 @@ async def weixin_refresh_account(account_id: int) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"刷新登录失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/accounts/{account_id}/open-post-list")
+async def weixin_open_post_list(account_id: int) -> Dict[str, Any]:
+    """
+    使用与上传相同的 Edge/Chromium 配置，注入已保存 Cookie，打开视频号「视频」列表页。
+    使用独立 viewer 用户数据目录 + Drission auto_port，可与正在上传的同一账号并行（两扇 Edge 窗口）。
+    在独立线程中启动，避免阻塞接口。
+    """
+    account = weixin_account_mgr.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    if not Path(account["cookie_path"]).exists():
+        raise HTTPException(status_code=400, detail="Cookie 不存在，请先扫码登录")
+
+    def run_open():
+        try:
+            result = weixin_account_mgr.open_channels_post_list(account_id)
+            if result.get("status") == "error":
+                logger.error(f"打开视频管理页: {result.get('message')}")
+        except Exception as e:
+            logger.error(f"打开视频管理页异常: {e}")
+
+    Thread(target=run_open, daemon=True).start()
+    return {
+        "status": "started",
+        "message": "正在打开视频管理页（可与上传并行；若已开着 viewer 再点需先关旧窗口）",
+    }
 
 
 @app.post("/api/weixin/accounts/check-cookies")

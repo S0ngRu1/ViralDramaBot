@@ -1,7 +1,7 @@
 """
 元数据获取模块
 
-支持三种方式获取视频的标题、描述、标签：
+支持三种方式获取视频的描述、标签（自动解析不写「短标题」，由上传页填入描述区）：
 1. 手动填写
 2. 从文件名/目录名读取
 3. AI 自动生成（可选）
@@ -43,68 +43,70 @@ class MetadataResolver:
     @staticmethod
     def from_filename(video_path: str) -> VideoMetadata:
         """
-        从文件名读取元数据
+        从文件名读取元数据（写入描述栏，短标题留空）
 
         支持的命名格式：
-        - 标题.mp4 → 标题
-        - 标题_描述.mp4 → 标题 + 描述
-        - 标题_描述_标签1,标签2.mp4 → 标题 + 描述 + 标签
-        - 标题#标签1#标签2.mp4 → 标题 + 标签
+        - 名称.mp4 → 整段名称作为描述
+        - 片段A_片段B.mp4 → 两段合并为描述（换行）
+        - 片段A_片段B_标签1,标签2.mp4 → 前两段为描述，第三段为标签
+        - 主干#标签1#标签2.mp4 → 主干为描述 + 标签列表
         """
         path = Path(video_path)
         name = path.stem  # 不含扩展名的文件名
 
-        title = None
         description = None
         tags = []
 
-        # 格式1: 标题_描述_标签1,标签2
+        # 格式1: 片段A_片段B_标签1,标签2 → 写入描述（不写短标题）
         if "_" in name:
             parts = name.split("_", 2)
-            title = parts[0].strip()
+            description = parts[0].strip()
             if len(parts) > 1 and parts[1].strip():
-                description = parts[1].strip()
+                description = (
+                    (description + "\n" + parts[1].strip()) if description else parts[1].strip()
+                )
             if len(parts) > 2:
                 tag_str = parts[2].strip()
                 tags = [t.strip() for t in tag_str.split(",") if t.strip()]
 
-        # 格式2: 标题#标签1#标签2
+        # 格式2: 主干#标签1#标签2 → 主干进描述
         elif "#" in name:
             parts = name.split("#")
-            title = parts[0].strip()
+            description = parts[0].strip()
             tags = [p.strip() for p in parts[1:] if p.strip()]
 
-        # 格式3: 仅文件名作为标题
+        # 格式3: 仅文件名 → 整段作为描述
         else:
-            title = name.strip()
+            description = name.strip()
 
-        return VideoMetadata(title=title, description=description, tags=tags)
+        return VideoMetadata(title=None, description=description, tags=tags)
 
     @staticmethod
     def from_directory(video_path: str) -> VideoMetadata:
         """
-        从所在目录名读取元数据
+        从所在目录名读取元数据（写入描述栏，短标题留空）
 
-        目录名格式: 标题_描述_标签1,标签2
+        目录名格式同文件名解析规则。
         """
         path = Path(video_path)
         dir_name = path.parent.name
 
-        title = None
         description = None
         tags = []
 
         if "_" in dir_name:
             parts = dir_name.split("_", 2)
-            title = parts[0].strip()
+            description = parts[0].strip()
             if len(parts) > 1 and parts[1].strip():
-                description = parts[1].strip()
+                description = (
+                    (description + "\n" + parts[1].strip()) if description else parts[1].strip()
+                )
             if len(parts) > 2:
                 tags = [t.strip() for t in parts[2].split(",") if t.strip()]
         else:
-            title = dir_name.strip()
+            description = dir_name.strip()
 
-        return VideoMetadata(title=title, description=description, tags=tags)
+        return VideoMetadata(title=None, description=description, tags=tags)
 
     @staticmethod
     def from_ai(
@@ -152,10 +154,13 @@ class MetadataResolver:
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group())
+                t = (data.get("title") or "").strip()
+                d = (data.get("description") or "").strip()
+                merged = "\n\n".join(x for x in [t, d] if x).strip() or None
                 return VideoMetadata(
-                    title=data.get("title"),
-                    description=data.get("description"),
-                    tags=data.get("tags", []),
+                    title=None,
+                    description=merged,
+                    tags=data.get("tags") or [],
                 )
             else:
                 logger.warning("AI 返回格式异常，使用文件名作为标题")
