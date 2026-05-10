@@ -1283,10 +1283,13 @@ class Uploader:
     def _click_publish(self, page: ChromiumPage):
         """点击发表按钮"""
         logger.info("正在发表...")
-        # 等待按钮可用（视频处理完成后才可点击），最多等 60 秒
-        for attempt in range(30):
+        # 等待按钮可用（服务端转码/处理完成后才可点击），时长上限与 UPLOAD_TIMEOUT 一致
+        start = time.time()
+        deadline = start + WeixinConfig.UPLOAD_TIMEOUT
+        last_log = start
+        logged_disabled_hint = False
+        while time.time() < deadline:
             try:
-                # 遍历所有 primary 按钮，找到文本为"发表"且未禁用的
                 buttons = page.eles("css:.weui-desktop-btn_primary", timeout=2)
                 for btn in buttons:
                     if btn.text.strip() == "发表":
@@ -1296,14 +1299,28 @@ class Uploader:
                             logger.info("已点击发表按钮")
                             self._random_delay(1, 2)
                             return
-                        else:
-                            if attempt % 5 == 0:
-                                logger.info(f"发表按钮暂不可用，等待中... ({attempt + 1}/30)")
-                            break
+                        now = time.time()
+                        if not logged_disabled_hint:
+                            logger.info(
+                                "发表按钮暂不可用，等待中...（与上传环节共用超时上限 %s 秒）",
+                                WeixinConfig.UPLOAD_TIMEOUT,
+                            )
+                            logged_disabled_hint = True
+                            last_log = now
+                        elif now - last_log >= 30:
+                            logger.info(
+                                "发表按钮仍不可用...（已等待 %.0f / %s 秒）",
+                                now - start,
+                                WeixinConfig.UPLOAD_TIMEOUT,
+                            )
+                            last_log = now
+                        break
             except Exception:
                 pass
             self._random_delay(1, 2)
-        raise Exception("未找到可用的发表按钮（等待超时）")
+        raise Exception(
+            f"未找到可用的发表按钮（等待超时 {WeixinConfig.UPLOAD_TIMEOUT} 秒，与视频上传超时一致）"
+        )
 
     def _is_post_list_url(self, url: str) -> bool:
         """发表成功后站点会跳转到作品列表页。"""

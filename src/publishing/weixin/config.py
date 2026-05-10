@@ -27,6 +27,8 @@ class WeixinConfig:
     BROWSER_HEADLESS = False  # 视频号需要扫码，默认不使用无头模式
     PAGE_LOAD_TIMEOUT = 30  # 页面加载超时（秒）
     UPLOAD_TIMEOUT = 600  # 上传超时（秒）
+    # 连续上传（如同一批任务）时，上一个视频成功后到开始下一个的间隔（秒）
+    INTER_UPLOAD_COOLDOWN_SEC = max(0, int(os.getenv("WEIXIN_INTER_UPLOAD_COOLDOWN_SEC", "20")))
     OPERATION_DELAY_MIN = 0.5  # 操作间最小延迟（秒）
     OPERATION_DELAY_MAX = 2.0  # 操作间最大延迟（秒）
 

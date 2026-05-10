@@ -14,6 +14,7 @@ ViralDramaBot Web 应用服务器
 import sys
 import asyncio
 import os
+import time
 
 
 import platform
@@ -56,6 +57,7 @@ project_root = get_project_root()
 sys.path.insert(0, str(project_root))
 
 from src.ingestion.douyin import get_downloader, DouyinDownloader
+from src.publishing.weixin.config import WeixinConfig
 from src.publishing.weixin.dao import WeixinDAO
 from src.publishing.weixin.account_manager import AccountManager, CookieChecker
 from src.publishing.weixin.uploader import Uploader
@@ -1303,10 +1305,10 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
 
         # 批量上传在后台依次执行
         def do_batch_upload():
-            for task_id in task_ids:
+            for idx, task_id in enumerate(task_ids):
                 task = weixin_dao.get_task(task_id)
                 if task:
-                    weixin_uploader.upload_video(
+                    result = weixin_uploader.upload_video(
                         task_id=task_id,
                         account_id=request.account_id,
                         video_path=task["video_path"],
@@ -1316,6 +1318,16 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
                         metadata_source=request.metadata_source.value,
                         drama_link=request.drama_link,
                     )
+                    if (
+                        result.get("status") == "success"
+                        and idx < len(task_ids) - 1
+                        and WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC > 0
+                    ):
+                        logger.info(
+                            "批量上传：本视频已成功，等待 %s 秒后继续下一个",
+                            WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC,
+                        )
+                        time.sleep(WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC)
 
         background_tasks.add_task(do_batch_upload)
         return {"status": "started", "task_ids": task_ids, "total": len(task_ids)}
