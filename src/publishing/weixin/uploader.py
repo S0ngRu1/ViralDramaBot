@@ -20,6 +20,7 @@ from .config import WeixinConfig
 from .dao import WeixinDAO
 from .metadata import MetadataResolver, VideoMetadata
 from .schemas import AccountStatus, TaskStatus
+from .account_manager import get_account_lock
 from src.core.logger import logger
 
 # 全局上传并发闸门：避免多个 BackgroundTasks 同时跑 upload_video 导致多浏览器实例互相抢占。
@@ -86,6 +87,8 @@ class Uploader:
         logger.info(f"开始上传任务 #{task_id}: {video_file.name} → 账号 {account['name']}")
 
         _upload_slot.acquire()
+        account_lock = get_account_lock(account_id)
+        account_lock.acquire()
         page = None
         try:
             page = get_browser_for_account(account["cookie_path"])
@@ -131,6 +134,7 @@ class Uploader:
                     pass
             return self._fail_task(task_id, str(e))
         finally:
+            account_lock.release()
             _upload_slot.release()
 
     def _navigate_to_create(self, page: ChromiumPage):

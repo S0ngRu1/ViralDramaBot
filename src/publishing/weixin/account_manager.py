@@ -23,6 +23,22 @@ from src.core.logger import logger
 # Cookie 轮询间隔（秒）
 COOKIE_CHECK_INTERVAL_SECONDS = 3600  # 每小时检查一次
 
+# Per-account 锁：防止 Cookie 检查与上传任务同时操作同一账号的浏览器 user_data_dir
+_account_locks: dict[int, threading.Lock] = {}
+_account_locks_guard = threading.Lock()
+
+
+def get_account_lock(account_id: int) -> threading.Lock:
+    """获取指定账号的锁（线程安全的懒创建）"""
+    lock = _account_locks.get(account_id)
+    if lock is None:
+        with _account_locks_guard:
+            lock = _account_locks.get(account_id)
+            if lock is None:
+                lock = threading.Lock()
+                _account_locks[account_id] = lock
+    return lock
+
 
 class AccountManager:
     """视频号账号管理器"""
@@ -100,6 +116,18 @@ class AccountManager:
     def auto_login(self, account_id: int) -> bool:
         """
         自动登录（使用已保存的 Cookie，后台静默验证，不弹出浏览器）
+        会获取 per-account 锁，防止与上传任务并发操作同一 user_data_dir。
+
+        Returns:
+            bool: 登录是否成功
+        """
+        lock = get_account_lock(account_id)
+        with lock:
+            return self._auto_login_internal(account_id)
+
+    def _auto_login_internal(self, account_id: int) -> bool:
+        """
+        自动登录内部实现（不获取锁，调用方需自行持锁）
 
         Returns:
             bool: 登录是否成功
@@ -377,12 +405,13 @@ class AccountManager:
     def check_all_accounts_cookies(self) -> dict:
         """
         批量检查所有活跃账号的 Cookie 有效性
+        跳过当前有上传任务正在执行的账号，避免浏览器 user_data_dir 冲突。
 
         Returns:
-            dict: {"checked": int, "valid": int, "expired": int, "errors": int}
+            dict: {"checked": int, "valid": int, "expired": int, "errors": int, "skipped": int}
         """
         accounts = self.dao.get_all_accounts()
-        stats = {"checked": 0, "valid": 0, "expired": 0, "errors": 0}
+        stats = {"checked": 0, "valid": 0, "expired": 0, "errors": 0, "skipped": 0}
 
         for account in accounts:
             # 只检查状态为 ACTIVE 的账号
@@ -391,23 +420,34 @@ class AccountManager:
 
             account_id = account["id"]
             account_name = account["name"]
+
+            # 跳过有活跃上传任务的账号，避免浏览器 user_data_dir 冲突
+            if self.dao.has_active_task(account_id):
+                stats["skipped"] += 1
+                logger.info(f"[Cookie轮询] 账号 {account_name} 有上传任务进行中，跳过检查")
+                continue
+
             stats["checked"] += 1
 
             try:
-                if self.auto_login(account_id):
-                    stats["valid"] += 1
-                    logger.info(f"[Cookie轮询] 账号 {account_name} Cookie有效")
-                else:
-                    stats["expired"] += 1
-                    logger.warn(f"[Cookie轮询] 账号 {account_name} Cookie已过期")
+                # 使用 _auto_login_internal + per-account 锁，避免死锁
+                lock = get_account_lock(account_id)
+                with lock:
+                    if self._auto_login_internal(account_id):
+                        stats["valid"] += 1
+                        logger.info(f"[Cookie轮询] 账号 {account_name} Cookie有效")
+                    else:
+                        stats["expired"] += 1
+                        logger.warn(f"[Cookie轮询] 账号 {account_name} Cookie已过期")
             except Exception as e:
                 stats["errors"] += 1
                 logger.error(f"[Cookie轮询] 账号 {account_name} 检查异常: {e}")
 
-        if stats["checked"] > 0:
+        if stats["checked"] > 0 or stats["skipped"] > 0:
             logger.info(
                 f"[Cookie轮询] 完成 — 检查 {stats['checked']} 个账号, "
-                f"有效 {stats['valid']}, 过期 {stats['expired']}, 异常 {stats['errors']}"
+                f"有效 {stats['valid']}, 过期 {stats['expired']}, 异常 {stats['errors']}, "
+                f"跳过 {stats['skipped']}"
             )
         return stats
 

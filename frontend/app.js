@@ -1446,8 +1446,8 @@ app.component('weixin-page', {
                                 <input :value="uploadForm.video_path" type="text" placeholder="请选择视频文件" readonly>
                             </div>
                             <div style="display: flex; align-items: end;">
-                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingFile">
-                                    <span v-if="!isBrowsingFile">选择文件</span>
+                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingUploadFile">
+                                    <span v-if="!isBrowsingUploadFile">选择文件</span>
                                     <span v-else>选择中...</span>
                                 </button>
                             </div>
@@ -1518,8 +1518,8 @@ app.component('weixin-page', {
                             </tbody>
                         </table>
                         <div class="row">
-                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingFile">
-                                <span v-if="!isBrowsingFile">选择文件（可多选）</span>
+                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingBatchFiles">
+                                <span v-if="!isBrowsingBatchFiles">选择文件（可多选）</span>
                                 <span v-else>选择中...</span>
                             </button>
                         </div>
@@ -1695,7 +1695,8 @@ app.component('weixin-page', {
         const showAddAccount = ref(false);
         const newAccountName = ref('');
         const refreshingIds = ref(new Set());
-        const isBrowsingFile = ref(false);
+        const isBrowsingUploadFile = ref(false);
+        const isBrowsingBatchFiles = ref(false);
         const message = reactive({ show: false, type: 'info', text: '' });
 
         const uploadForm = reactive({
@@ -1843,8 +1844,8 @@ app.component('weixin-page', {
         }
 
         async function browseUploadFile() {
-            if (isBrowsingFile.value) return;
-            isBrowsingFile.value = true;
+            if (isBrowsingUploadFile.value) return;
+            isBrowsingUploadFile.value = true;
             try {
                 const res = await props.api.browseFile();
                 if (res.status === 'success' && res.path) {
@@ -1853,13 +1854,13 @@ app.component('weixin-page', {
             } catch (e) {
                 showMessage('选择文件失败: ' + (e.message || e), 'error');
             } finally {
-                isBrowsingFile.value = false;
+                isBrowsingUploadFile.value = false;
             }
         }
 
         async function browseBatchFiles() {
-            if (isBrowsingFile.value) return;
-            isBrowsingFile.value = true;
+            if (isBrowsingBatchFiles.value) return;
+            isBrowsingBatchFiles.value = true;
             try {
                 const res = await props.api.browseFiles();
                 if (res.status === 'success' && res.paths) {
@@ -1872,7 +1873,7 @@ app.component('weixin-page', {
             } catch (e) {
                 showMessage('选择文件失败: ' + (e.message || e), 'error');
             } finally {
-                isBrowsingFile.value = false;
+                isBrowsingBatchFiles.value = false;
             }
         }
 
@@ -1999,7 +2000,8 @@ app.component('weixin-page', {
         });
 
         return {
-            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds, isBrowsingFile,
+            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds,
+            isBrowsingUploadFile, isBrowsingBatchFiles,
             uploadForm, batchForm, scheduleForm,
             formatDate, getFileName, getAccountName,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,

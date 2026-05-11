@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
     <title>视频号上传管理 - ViralDramaBot</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
@@ -191,8 +193,8 @@
                                 <div class="flex-1">
                                     <input :value="uploadForm.video_path" placeholder="请选择视频文件" readonly>
                                 </div>
-                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingFile">
-                                    <span v-if="!isBrowsingFile">选择文件</span>
+                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingUploadFile">
+                                    <span v-if="!isBrowsingUploadFile">选择文件</span>
                                     <span v-else>选择中...</span>
                                 </button>
                             </div>
@@ -257,8 +259,8 @@
                                     </tr>
                                 </tbody>
                             </table>
-                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingFile">
-                                <span v-if="!isBrowsingFile">选择文件（可多选）</span>
+                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingBatchFiles">
+                                <span v-if="!isBrowsingBatchFiles">选择文件（可多选）</span>
                                 <span v-else>选择中...</span>
                             </button>
                             <p style="color: #999; font-size: 12px; margin-top: 5px;">
@@ -435,7 +437,8 @@
             const showAddAccount = ref(false);
             const newAccountName = ref('');
             const refreshingIds = ref(new Set());
-            const isBrowsingFile = ref(false);
+            const isBrowsingUploadFile = ref(false);
+            const isBrowsingBatchFiles = ref(false);
             const message = reactive({ show: false, type: 'info', text: '' });
 
             const uploadForm = reactive({
@@ -550,20 +553,20 @@
             }
 
             async function browseUploadFile() {
-                if (isBrowsingFile.value) return;
-                isBrowsingFile.value = true;
+                if (isBrowsingUploadFile.value) return;
+                isBrowsingUploadFile.value = true;
                 try {
                     const res = await axios.get('http://localhost:8000/api/browse-file');
                     if (res.data.status === 'success' && res.data.path) {
                         uploadForm.video_path = res.data.path;
                     }
                 } catch (e) { showMessage('选择文件失败: ' + (e.message || e), 'error'); }
-                finally { isBrowsingFile.value = false; }
+                finally { isBrowsingUploadFile.value = false; }
             }
 
             async function browseBatchFiles() {
-                if (isBrowsingFile.value) return;
-                isBrowsingFile.value = true;
+                if (isBrowsingBatchFiles.value) return;
+                isBrowsingBatchFiles.value = true;
                 try {
                     const res = await axios.get('http://localhost:8000/api/browse-files');
                     if (res.data.status === 'success' && res.data.paths) {
@@ -574,7 +577,7 @@
                         }
                     }
                 } catch (e) { showMessage('选择文件失败: ' + (e.message || e), 'error'); }
-                finally { isBrowsingFile.value = false; }
+                finally { isBrowsingBatchFiles.value = false; }
             }
 
             function removeBatchFile(idx) {
@@ -668,7 +671,8 @@
             onMounted(() => { loadAccounts(); loadSchedules(); });
 
             return {
-                tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds, isBrowsingFile,
+                tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds,
+                isBrowsingUploadFile, isBrowsingBatchFiles,
                 uploadForm, batchForm, scheduleForm,
                 formatDate, getFileName, getAccountName,
                 getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,

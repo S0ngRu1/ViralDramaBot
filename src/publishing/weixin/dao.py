@@ -258,6 +258,22 @@ class WeixinDAO:
             cursor = conn.execute("DELETE FROM upload_tasks WHERE id = ?", (task_id,))
             return cursor.rowcount > 0
 
+    def has_active_task(self, account_id: int) -> bool:
+        """检查指定账号是否有正在执行的上传任务（UPLOADING/PROCESSING/FILLING/PUBLISHING）"""
+        active_statuses = (
+            TaskStatus.UPLOADING.value,
+            TaskStatus.PROCESSING.value,
+            TaskStatus.FILLING.value,
+            TaskStatus.PUBLISHING.value,
+        )
+        with self._get_conn() as conn:
+            placeholders = ",".join("?" for _ in active_statuses)
+            row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM upload_tasks WHERE account_id = ? AND status IN ({placeholders})",
+                (account_id, *active_statuses),
+            ).fetchone()
+            return row["cnt"] > 0
+
     # ==================== 定时计划操作 ====================
 
     def create_schedule(

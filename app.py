@@ -27,7 +27,7 @@ from threading import Lock, Thread
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -139,18 +139,18 @@ app.add_middleware(
 )
 
 
-# 禁用静态文件缓存（开发环境）
-from starlette.middleware.base import BaseHTTPMiddleware
-
-class NoCacheMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+# 仅对 /frontend 下静态资源禁用缓存，避免浏览器长期持有旧的 app.js / weixin.html
+@app.middleware("http")
+async def _no_cache_frontend_static(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/frontend/") and path.endswith(
+        (".js", ".html", ".css", ".json")
+    ):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-        return response
-
-app.add_middleware(NoCacheMiddleware)
+    return response
 
 # 挂载前端静态文件到 /frontend 路径
 frontend_dir = project_root / "frontend"
