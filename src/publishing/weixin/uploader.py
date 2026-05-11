@@ -1289,6 +1289,11 @@ class Uploader:
         last_log = start
         logged_disabled_hint = False
         while time.time() < deadline:
+            # 检查浏览器是否已关闭
+            try:
+                page.run_js("return 1")
+            except Exception:
+                raise Exception("浏览器已关闭，无法继续等待发表按钮")
             try:
                 buttons = page.eles("css:.weui-desktop-btn_primary", timeout=2)
                 for btn in buttons:
@@ -1302,16 +1307,13 @@ class Uploader:
                         now = time.time()
                         if not logged_disabled_hint:
                             logger.info(
-                                "发表按钮暂不可用，等待中...（与上传环节共用超时上限 %s 秒）",
-                                WeixinConfig.UPLOAD_TIMEOUT,
+                                f"发表按钮暂不可用，等待中...（与上传环节共用超时上限 {WeixinConfig.UPLOAD_TIMEOUT} 秒）"
                             )
                             logged_disabled_hint = True
                             last_log = now
                         elif now - last_log >= 30:
                             logger.info(
-                                "发表按钮仍不可用...（已等待 %.0f / %s 秒）",
-                                now - start,
-                                WeixinConfig.UPLOAD_TIMEOUT,
+                                f"发表按钮仍不可用...（已等待 {now - start:.0f} / {WeixinConfig.UPLOAD_TIMEOUT} 秒）"
                             )
                             last_log = now
                         break

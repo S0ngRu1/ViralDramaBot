@@ -102,6 +102,10 @@ async def lifespan(app):
     repair_missing_video_entries()
     if repair_task is None or repair_task.done():
         repair_task = asyncio.create_task(periodic_index_repair())
+    # 同步视频号配置到 WeixinConfig
+    WeixinConfig.UPLOAD_TIMEOUT = config.weixin_upload_timeout
+    WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC = config.weixin_inter_upload_cooldown
+    WeixinConfig.MAX_RETRIES = config.weixin_max_retries
     # 启动视频号定时调度器
     weixin_scheduler.start()
     # 启动 Cookie 后台轮询（每小时检查一次）
@@ -203,6 +207,10 @@ class AppSettings(BaseModel):
     video_dir: str
     download_timeout: int = 1200
     max_retries: int = 3
+    # 视频号配置
+    weixin_upload_timeout: int = 600
+    weixin_inter_upload_cooldown: int = 20
+    weixin_max_retries: int = 3
 
 
 class DownloadProgress(BaseModel):
@@ -1082,30 +1090,40 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
     try:
         if settings.download_timeout < 60:
             raise ValueError("下载超时时间不能小于 60 秒")
+        if settings.weixin_upload_timeout < 60:
+            raise ValueError("视频号上传超时不能小于 60 秒")
 
         # 验证目录存在
         video_path = Path(settings.video_dir)
         video_path.mkdir(parents=True, exist_ok=True)
-        
+
         # 更新配置
         updated_settings = config.update(
             work_dir=str(settings.video_dir),
             download_timeout=settings.download_timeout,
-            max_retries=settings.max_retries
+            max_retries=settings.max_retries,
+            weixin_upload_timeout=settings.weixin_upload_timeout,
+            weixin_inter_upload_cooldown=settings.weixin_inter_upload_cooldown,
+            weixin_max_retries=settings.weixin_max_retries
         )
         get_downloader().configure(
             download_timeout=settings.download_timeout,
             max_retries=settings.max_retries
         )
-        
+
+        # 同步视频号配置到 WeixinConfig
+        WeixinConfig.UPLOAD_TIMEOUT = config.weixin_upload_timeout
+        WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC = config.weixin_inter_upload_cooldown
+        WeixinConfig.MAX_RETRIES = config.weixin_max_retries
+
         logger.info(f"✅ 应用设置已更新: {settings}")
-        
+
         return {
             "status": "success",
             "message": "设置已更新",
             "settings": updated_settings
         }
-    
+
     except Exception as e:
         logger.error(f"❌ 更新设置失败: {str(e)}")
         raise HTTPException(
@@ -1324,8 +1342,7 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
                         and WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC > 0
                     ):
                         logger.info(
-                            "批量上传：本视频已成功，等待 %s 秒后继续下一个",
-                            WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC,
+                            f"批量上传：本视频已成功，等待 {WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC} 秒后继续下一个"
                         )
                         time.sleep(WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC)
 

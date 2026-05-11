@@ -360,18 +360,18 @@ const app = createApp({
                     </li>
                     <li>
                         <a
-                            :class="{ active: currentPage === 'settings' }"
-                            @click="currentPage = 'settings'"
-                        >
-                            ⚙️ 应用设置
-                        </a>
-                    </li>
-                    <li>
-                        <a
                             :class="{ active: currentPage === 'weixin' }"
                             @click="currentPage = 'weixin'"
                         >
                             📤 视频号上传
+                        </a>
+                    </li>
+                    <li>
+                        <a
+                            :class="{ active: currentPage === 'settings' }"
+                            @click="currentPage = 'settings'"
+                        >
+                            ⚙️ 应用设置
                         </a>
                     </li>
                 </ul>
@@ -420,7 +420,10 @@ const app = createApp({
         const settings = ref({
             video_dir: '.data',
             download_timeout: 1200,
-            max_retries: 3
+            max_retries: 3,
+            weixin_upload_timeout: 600,
+            weixin_inter_upload_cooldown: 20,
+            weixin_max_retries: 3
         });
         const messages = ref([]);
 
@@ -1215,7 +1218,7 @@ app.component('settings-page', {
 
                 <div class="form-group">
                     <label>最大重试次数</label>
-                    <input 
+                    <input
                         v-model.number="formData.max_retries"
                         type="number"
                         min="1"
@@ -1225,8 +1228,52 @@ app.component('settings-page', {
                         网络请求失败时的重试次数
                     </p>
                 </div>
+            </div>
 
-                <button 
+            <!-- 视频号配置 -->
+            <div class="card">
+                <div class="card-title">视频号配置</div>
+
+                <div class="form-group">
+                    <label>上传超时时间 (秒)</label>
+                    <input
+                        v-model.number="formData.weixin_upload_timeout"
+                        type="number"
+                        min="60"
+                        max="3600"
+                    />
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        视频上传和发表按钮等待的超时时间，默认 600 秒（10 分钟）
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label>连续上传间隔 (秒)</label>
+                    <input
+                        v-model.number="formData.weixin_inter_upload_cooldown"
+                        type="number"
+                        min="0"
+                        max="300"
+                    />
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        批量上传时，两个视频之间的等待间隔，默认 20 秒
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label>视频号最大重试次数</label>
+                    <input
+                        v-model.number="formData.weixin_max_retries"
+                        type="number"
+                        min="1"
+                        max="10"
+                    />
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        视频号上传失败时的重试次数
+                    </p>
+                </div>
+
+                <button
                     class="btn btn-primary btn-block"
                     @click="save"
                 >
@@ -1259,7 +1306,10 @@ app.component('settings-page', {
         const formData = reactive({
             video_dir: props.settings.video_dir,
             download_timeout: props.settings.download_timeout,
-            max_retries: props.settings.max_retries
+            max_retries: props.settings.max_retries,
+            weixin_upload_timeout: props.settings.weixin_upload_timeout || 600,
+            weixin_inter_upload_cooldown: props.settings.weixin_inter_upload_cooldown || 20,
+            weixin_max_retries: props.settings.weixin_max_retries || 3
         });
         const isBrowsing = ref(false);
 

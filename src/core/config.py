@@ -15,12 +15,17 @@ from .logger import logger
 
 class Config:
     """配置类"""
-    
+
     # 默认工作目录
-    DEFAULT_WORK_DIR = None 
+    DEFAULT_WORK_DIR = None
     DEFAULT_DOWNLOAD_TIMEOUT = 1200
     DEFAULT_MAX_RETRIES = 3
-    
+
+    # 视频号默认配置
+    DEFAULT_WEIXIN_UPLOAD_TIMEOUT = 600
+    DEFAULT_WEIXIN_INTER_UPLOAD_COOLDOWN = 20
+    DEFAULT_WEIXIN_MAX_RETRIES = 3
+
     def __init__(self):
         """初始化配置"""
         # 从环境变量读取工作目录，如果未设置则使用默认值
@@ -35,7 +40,18 @@ class Config:
         self.max_retries = int(
             os.getenv('MAX_RETRIES', str(self.DEFAULT_MAX_RETRIES))
         )
-        
+
+        # 视频号配置
+        self.weixin_upload_timeout = int(
+            os.getenv('WEIXIN_UPLOAD_TIMEOUT', str(self.DEFAULT_WEIXIN_UPLOAD_TIMEOUT))
+        )
+        self.weixin_inter_upload_cooldown = int(
+            os.getenv('WEIXIN_INTER_UPLOAD_COOLDOWN_SEC', str(self.DEFAULT_WEIXIN_INTER_UPLOAD_COOLDOWN))
+        )
+        self.weixin_max_retries = int(
+            os.getenv('WEIXIN_MAX_RETRIES', str(self.DEFAULT_WEIXIN_MAX_RETRIES))
+        )
+
         # 将工作目录转换为 Path 对象
         self.work_path = Path(self.work_dir)
     
@@ -113,7 +129,10 @@ class Config:
         self,
         work_dir: str | None = None,
         download_timeout: int | None = None,
-        max_retries: int | None = None
+        max_retries: int | None = None,
+        weixin_upload_timeout: int | None = None,
+        weixin_inter_upload_cooldown: int | None = None,
+        weixin_max_retries: int | None = None
     ) -> dict:
         """
         更新运行时配置
@@ -122,6 +141,9 @@ class Config:
             work_dir: 视频保存目录
             download_timeout: 下载超时时间（秒）
             max_retries: 最大重试次数
+            weixin_upload_timeout: 视频号上传超时（秒）
+            weixin_inter_upload_cooldown: 视频号连续上传间隔（秒）
+            weixin_max_retries: 视频号最大重试次数
 
         Returns:
             dict: 更新后的配置快照
@@ -136,6 +158,15 @@ class Config:
         if max_retries is not None:
             self.max_retries = int(max_retries)
 
+        if weixin_upload_timeout is not None:
+            self.weixin_upload_timeout = int(weixin_upload_timeout)
+
+        if weixin_inter_upload_cooldown is not None:
+            self.weixin_inter_upload_cooldown = int(weixin_inter_upload_cooldown)
+
+        if weixin_max_retries is not None:
+            self.weixin_max_retries = int(weixin_max_retries)
+
         if not self.initialize_work_dir():
             raise ValueError(f"无法访问工作目录: {self.work_dir}")
 
@@ -146,7 +177,10 @@ class Config:
         return {
             "video_dir": str(self.work_dir),
             "download_timeout": int(self.download_timeout),
-            "max_retries": int(self.max_retries)
+            "max_retries": int(self.max_retries),
+            "weixin_upload_timeout": int(self.weixin_upload_timeout),
+            "weixin_inter_upload_cooldown": int(self.weixin_inter_upload_cooldown),
+            "weixin_max_retries": int(self.weixin_max_retries)
         }
 
 
