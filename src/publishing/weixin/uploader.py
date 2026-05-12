@@ -44,6 +44,7 @@ class Uploader:
         metadata_source: str = "manual",
         scheduled_at: Optional[datetime] = None,
         drama_link: Optional[str] = None,
+        location_name: Optional[str] = None,
     ) -> dict:
         """
         上传单个视频
@@ -106,6 +107,11 @@ class Uploader:
             # 3. 填写标题、描述、标签、剧集链接
             self.dao.update_task_status(task_id, TaskStatus.FILLING)
             self._fill_metadata(page, metadata, drama_link)
+
+            # 3.5 设置位置信息
+            if location_name:
+                self._set_location(page, location_name)
+                self._random_delay(0.5, 1)
 
             # 4. 设置定时发布
             if scheduled_at:
@@ -346,6 +352,119 @@ class Uploader:
             logger.warning("未找到短标题输入框")
         except Exception as e:
             logger.warning(f"短标题填写失败: {e}")
+
+    def _set_location(self, page: ChromiumPage, location_name: str):
+        """设置位置信息：注入 fetch 拦截器替换坐标 → 点击位置区域 → 搜索 → 选择匹配项"""
+        try:
+            logger.info(f"正在设置位置: {location_name}")
+
+            # 1. 注入 fetch 拦截器，将位置搜索 API 的坐标替换为目标城市
+            self._inject_fetch_interceptor(page, 34.640136, 113.593982)
+            self._random_delay(0.5, 1)
+
+            # 3. 点击位置区域展开下拉
+            position_display = page.ele("css:.post-position-wrap .position-display", timeout=3)
+            if not position_display:
+                position_display = page.ele("css:.position-display", timeout=2)
+            if not position_display:
+                logger.warning("未找到位置区域")
+                return
+
+            if not self._scroll_click_element(page, position_display):
+                logger.warning("点击位置区域失败")
+                return
+            self._random_delay(0.5, 1)
+
+            # 4. 等待下拉框出现
+            filter_wrap = page.ele("css:.location-filter-wrap", timeout=3)
+            if not filter_wrap:
+                logger.warning("未找到位置下拉框")
+                return
+
+            # 5. 找到搜索框并输入位置关键词
+            search_input = page.ele("css:.location-filter-wrap input[placeholder*='搜索']", timeout=3)
+            if not search_input:
+                search_input = page.ele("css:.location-filter-wrap input", timeout=2)
+            if not search_input:
+                logger.warning("未找到位置搜索框")
+                return
+
+            search_input.click()
+            self._random_delay(0.2, 0.3)
+            try:
+                search_input.clear()
+            except Exception:
+                pass
+            self._human_type(search_input, location_name)
+            self._random_delay(1, 2)
+
+            # 6. 等待位置列表加载并点击匹配项
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
+                for item in items:
+                    try:
+                        name_el = item.ele("css:.name", timeout=0.5)
+                        if not name_el:
+                            continue
+                        name_text = (name_el.text or "").strip()
+                        if not name_text or name_text == "不显示位置":
+                            continue
+                        # 优先精确匹配
+                        if name_text == location_name or location_name in name_text:
+                            item.click()
+                            logger.info(f"已选择位置: {name_text}")
+                            return
+                    except Exception:
+                        continue
+
+                # 没有精确匹配，选第一个非"不显示位置"的项
+                for item in items:
+                    try:
+                        name_el = item.ele("css:.name", timeout=0.5)
+                        if not name_el:
+                            continue
+                        name_text = (name_el.text or "").strip()
+                        if name_text and name_text != "不显示位置":
+                            item.click()
+                            logger.info(f"已选择位置（首个匹配）: {name_text}")
+                            return
+                    except Exception:
+                        continue
+
+                self._random_delay(0.5, 1)
+
+            logger.warning(f"未找到匹配的位置: {location_name}")
+
+        except Exception as e:
+            logger.warning(f"设置位置失败: {e}")
+
+    def _inject_fetch_interceptor(self, page: ChromiumPage, lat: float, lng: float):
+        """注入 fetch 拦截器，将 helper_search_location API 的坐标替换为目标城市坐标"""
+        js = f"""
+        (function() {{
+            var targetLat = {lat};
+            var targetLng = {lng};
+            var origFetch = window.fetch;
+            window.fetch = function(input, init) {{
+                var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                if (url.indexOf('helper_search_location') !== -1 && init && init.body) {{
+                    try {{
+                        var body = JSON.parse(init.body);
+                        body.latitude = targetLat;
+                        body.longitude = targetLng;
+                        init.body = JSON.stringify(body);
+                    }} catch(e) {{}}
+                }}
+                return origFetch.call(this, input, init);
+            }};
+        }})();
+        """
+        try:
+            page.run_js(js)
+            logger.info(f"已注入 fetch 拦截器，目标坐标: {lat}, {lng}")
+        except Exception as e:
+            logger.warning(f"注入 fetch 拦截器失败: {e}")
 
     def _add_tag(self, page: ChromiumPage, tag_name: str):
         """通过点击 #话题 按钮添加真实标签"""

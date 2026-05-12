@@ -1477,6 +1477,10 @@ app.component('weixin-page', {
                         <input v-model="uploadForm.drama_link" type="text" placeholder="输入视频号剧集名称">
                     </div>
                     <div class="form-group">
+                        <label>位置信息（可选）</label>
+                        <input v-model="uploadForm.location_name" type="text" placeholder="输入位置名称，支持异地位置，如：河南郑州二七广场">
+                    </div>
+                    <div class="form-group">
                         <label>定时发布（可选）</label>
                         <input type="datetime-local" v-model="uploadForm.scheduled_at">
                     </div>
@@ -1538,6 +1542,10 @@ app.component('weixin-page', {
                     <div class="form-group">
                         <label>剧集链接（可选）</label>
                         <input v-model="batchForm.drama_link" type="text" placeholder="输入视频号剧集名称">
+                    </div>
+                    <div class="form-group">
+                        <label>位置信息（可选，所有视频共用）</label>
+                        <input v-model="batchForm.location_name" type="text" placeholder="输入位置名称，支持异地位置，如：河南郑州二七广场">
                     </div>
                     <div class="form-group">
                         <label>元数据来源</label>
@@ -1701,10 +1709,10 @@ app.component('weixin-page', {
 
         const uploadForm = reactive({
             account_id: '', video_path: '', description: '',
-            tagsStr: '', metadata_source: 'manual', scheduled_at: '', drama_link: ''
+            tagsStr: '', metadata_source: 'manual', scheduled_at: '', drama_link: '', location_name: ''
         });
         const batchForm = reactive({
-            account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual', drama_link: ''
+            account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual', drama_link: '', location_name: ''
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -1893,6 +1901,7 @@ app.component('weixin-page', {
                     metadata_source: uploadForm.metadata_source,
                     scheduled_at: uploadForm.scheduled_at ? new Date(uploadForm.scheduled_at).toISOString() : null,
                     drama_link: uploadForm.drama_link || null,
+                    location_name: uploadForm.location_name || null,
                 };
                 const res = await props.api.createWeixinUpload(payload);
                 showMessage(res.message || '任务已创建', 'success');
@@ -1901,6 +1910,7 @@ app.component('weixin-page', {
                 uploadForm.tagsStr = '';
                 uploadForm.scheduled_at = '';
                 uploadForm.drama_link = '';
+                uploadForm.location_name = '';
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
             }
@@ -1924,12 +1934,14 @@ app.component('weixin-page', {
                     tags: tags.length ? tags : null,
                     metadata_source: batchForm.metadata_source,
                     drama_link: batchForm.drama_link || null,
+                    location_name: batchForm.location_name || null,
                 });
                 showMessage('批量任务已创建，共 ' + res.total + ' 个', 'success');
                 batchForm.videoFiles = [];
                 batchForm.tagsStr = '';
                 batchForm.descriptionStr = '';
                 batchForm.drama_link = '';
+                batchForm.location_name = '';
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
             }

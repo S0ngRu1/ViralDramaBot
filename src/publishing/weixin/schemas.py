@@ -62,6 +62,7 @@ class UploadTaskCreate(BaseModel):
     )
     scheduled_at: Optional[datetime] = Field(None, description="定时发布时间")
     drama_link: Optional[str] = Field(None, description="视频号剧集名称")
+    location_name: Optional[str] = Field(None, description="位置名称")
 
 
 class BatchUploadCreate(BaseModel):
@@ -76,6 +77,7 @@ class BatchUploadCreate(BaseModel):
     )
     scheduled_at: Optional[datetime] = Field(None, description="定时发布时间（第一个视频的时间，后续依次递增）")
     drama_link: Optional[str] = Field(None, description="视频号剧集名称")
+    location_name: Optional[str] = Field(None, description="位置名称")
 
 
 class TaskInfo(BaseModel):

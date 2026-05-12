@@ -1286,6 +1286,7 @@ async def weixin_create_upload_task(request: UploadTaskCreate, background_tasks:
                     tags=request.tags,
                     metadata_source=request.metadata_source.value,
                     drama_link=request.drama_link,
+                    location_name=request.location_name,
                 )
 
             background_tasks.add_task(do_upload)
@@ -1335,6 +1336,7 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
                         tags=task.get("tags"),
                         metadata_source=request.metadata_source.value,
                         drama_link=request.drama_link,
+                        location_name=request.location_name,
                     )
                     if (
                         result.get("status") == "success"
