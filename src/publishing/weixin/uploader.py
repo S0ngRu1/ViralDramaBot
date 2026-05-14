@@ -40,14 +40,17 @@ class Uploader:
         video_path: str,
         title: Optional[str] = None,
         description: Optional[str] = None,
-        tags: Optional[list[str]] = None,
         metadata_source: str = "manual",
         scheduled_at: Optional[datetime] = None,
         drama_link: Optional[str] = None,
-        location_name: Optional[str] = None,
     ) -> dict:
         """
-        上传单个视频
+        上传单个视频。
+
+        当前发表流程只会填写「视频描述」+「剧集链接」+「不显示位置」。标签功能已下线，
+        所有标签写入逻辑均不再执行（保留过期的 `tags` 字段会被忽略）。
+
+        位置默认强制为「不显示位置」（位置列表第一项），避免 IP 定位被自动写入。
 
         Returns:
             dict: {"status": "success"/"failed", "message": "..."}
@@ -76,14 +79,15 @@ class Uploader:
                 task_id, f"视频文件过大: {file_size_mb:.1f}MB，最大: {WeixinConfig.MAX_VIDEO_SIZE_MB}MB"
             )
 
-        # 解析元数据
+        # 解析元数据；标签功能已下线，所以这里固定传空列表，避免任何后续 tag 处理。
         metadata = MetadataResolver.resolve(
             video_path=video_path,
             source=metadata_source,
             title=title,
             description=description,
-            tags=tags,
+            tags=None,
         )
+        metadata.tags = []
 
         logger.info(f"开始上传任务 #{task_id}: {video_file.name} → 账号 {account['name']}")
 
@@ -95,34 +99,27 @@ class Uploader:
             page = get_browser_for_account(account["cookie_path"])
             self._load_cookies(page, account["cookie_path"])
 
-            # 1. 导航到发布页面
             self.dao.update_task_status(task_id, TaskStatus.UPLOADING)
             self._navigate_to_create(page)
 
-            # 2. 上传视频文件
             self._upload_file(page, str(video_file.absolute()))
             self.dao.update_task_status(task_id, TaskStatus.PROCESSING)
             self._wait_for_upload_complete(page)
 
-            # 3. 填写标题、描述、标签、剧集链接
             self.dao.update_task_status(task_id, TaskStatus.FILLING)
             self._fill_metadata(page, metadata, drama_link)
 
-            # 3.5 设置位置信息
-            if location_name:
-                self._set_location(page, location_name)
-                self._random_delay(0.5, 1)
+            # 强制将位置设为「不显示位置」（位置列表第一项），避免 IP 定位泄漏
+            self._set_location_hidden(page)
+            self._random_delay(0.5, 1)
 
-            # 4. 设置定时发布
             if scheduled_at:
                 self._set_schedule_time(page, scheduled_at)
 
-            # 5. 发布
             self.dao.update_task_status(task_id, TaskStatus.PUBLISHING)
             self._click_publish(page)
             self._confirm_publish(page)
 
-            # 6. 保存更新后的 Cookie
             self._save_cookies(page, account["cookie_path"])
 
             page.quit()
@@ -144,12 +141,11 @@ class Uploader:
             _upload_slot.release()
 
     def _navigate_to_create(self, page: ChromiumPage):
-        """导航到视频发布页面"""
+        """导航到视频发布页面。"""
         logger.info("正在打开发表页面...")
         page.get(WeixinConfig.POST_CREATE_URL)
         self._random_delay(3, 5)
 
-        # 等待页面加载完成，检查上传区域
         upload_area = page.ele("css:.ant-upload-drag, .upload-content, .post-upload-wrap", timeout=15)
         if not upload_area:
             logger.warning("未找到上传区域，页面可能未完全加载")
@@ -254,76 +250,215 @@ class Uploader:
         raise Exception(f"视频上传超时（{WeixinConfig.UPLOAD_TIMEOUT}秒）")
 
     def _fill_metadata(self, page: ChromiumPage, metadata: VideoMetadata, drama_link: Optional[str] = None):
-        """填写描述、标签、短标题、剧集链接"""
+        """填写描述 + 剧集链接 + （可选）短标题。
+
+        标签写入已下线：`metadata.tags` 即便有值也不会再拼进描述、也不会再点 #话题 添加。
+        """
         logger.info("正在填写视频信息...")
 
-        # 将标签追加到描述末尾（格式：#标签1 #标签2）
-        description = metadata.description or ""
-        if metadata.tags:
-            tag_str = " ".join(f"#{tag}" for tag in metadata.tags[:5])
-            description = f"{description}\n{tag_str}" if description else tag_str
-
+        description = (metadata.description or "").strip()
         if description:
             self._fill_description(page, description)
             self._random_delay(0.5, 1)
 
-        # 添加剧集链接
         if drama_link:
             self._add_drama_link(page, drama_link)
             self._random_delay(0.5, 1)
 
-        # 填写短标题
         if metadata.title:
             self._fill_short_title(page, metadata.title)
 
         self._random_delay(0.5, 1)
 
     def _fill_description(self, page: ChromiumPage, description: str):
-        """填写描述内容"""
+        """
+        填写描述内容。
+
+        视频号的描述编辑器实际 DOM 结构（来自抓到的页面源代码 tmp/视频号创建视频.html）：
+
+            <div class="post-desc-box">
+              <div contenteditable="" data-placeholder="添加描述" class="input-editor"></div>
+              ...
+            </div>
+
+        历史踩坑：
+            1) 旧实现 A：`innerHTML + Event('input')`
+               → 页面看得到字，但发表后正文为空（Vue v-model 不认裸 Event）。
+            2) 旧实现 B：`innerHTML + 自构 InputEvent('input', inputType:'insertFromPaste', data)`
+               → 有时正常、有时被 Vue 当成「光标处再粘一遍」从而双写（任务日志里出现过
+               「期望=5 / 实际=10」的镜像现象），最终发布出去描述为空或异常。
+
+        现在改成 **完全走浏览器原生 `document.execCommand`**：
+            - `execCommand('selectAll') + execCommand('delete')` 清空
+            - `execCommand('insertText', false, line)` 逐行插入文本
+            - `execCommand('insertLineBreak', false, null)` 在行间插换行
+        execCommand 会派发真正的 `beforeinput` / `input` 事件，并由浏览器自己更新 DOM，
+        Vue 的 v-model 100% 同步，不会出现「DOM 一份 + v-model 又拼一份」的双写问题。
+
+        极端情况下（非常老旧的 Chromium 或 execCommand 整体失败）才回退到「Range
+        手动塞 textNode + 自构 InputEvent」的兜底路径。
+        """
         try:
-            # 找到描述框
-            desc_editor = page.ele("css:.post-desc-box .input-editor, [contenteditable][data-placeholder='添加描述']", timeout=3)
+            desc_editor = page.ele(
+                "css:[contenteditable][data-placeholder='添加描述']", timeout=3
+            )
+            if not desc_editor:
+                desc_editor = page.ele("css:.post-desc-box .input-editor", timeout=2)
+            if not desc_editor:
+                desc_editor = page.ele("css:.post-desc-box [contenteditable]", timeout=2)
+            if not desc_editor:
+                desc_editor = page.ele("css:[contenteditable='true']", timeout=2)
             if not desc_editor:
                 desc_editor = page.ele("css:[contenteditable='']", timeout=2)
 
-            if desc_editor:
-                # 点击聚焦
-                desc_editor.click()
-                self._random_delay(0.2, 0.3)
-
-                # 使用 JavaScript 设置内容并触发事件
-                # 需要模拟用户输入来触发 Vue 的响应式更新
-                page.run_js(f"""
-                    var el = arguments[0];
-                    el.focus();
-
-                    // 清空内容
-                    el.innerHTML = '';
-
-                    // 设置新内容
-                    var lines = `{description.replace('`', '\\`').replace('\\', '\\\\')}`.split('\\n');
-                    for (var i = 0; i < lines.length; i++) {{
-                        if (i > 0) {{
-                            el.appendChild(document.createElement('br'));
-                        }}
-                        el.appendChild(document.createTextNode(lines[i]));
-                    }}
-
-                    // 触发各种事件让 Vue 检测到变化
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                    el.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
-                    el.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true }}));
-
-                    // 尝试触发 Vue 的 v-model 更新
-                    var event = new Event('input', {{ bubbles: true }});
-                    Object.defineProperty(event, 'target', {{ value: el, enumerable: true }});
-                    el.dispatchEvent(event);
-                """, desc_editor)
-                logger.info(f"描述已填写: {description[:50]}...")
+            if not desc_editor:
+                logger.warning("未找到描述输入框")
                 return
 
-            logger.warning("未找到描述输入框")
+            desc_editor.click()
+            self._random_delay(0.2, 0.4)
+
+            # DrissionPage 会把脚本包成 function(){<user code>}，要用顶层 return 才能把
+            # 结果带回 Python，否则 run_js 永远返回 None。
+            js = r"""
+            var el = arguments[0];
+            var value = String(arguments[1] == null ? '' : arguments[1]);
+            if (!el) return { ok: false, reason: 'no element' };
+
+            function findEditable(root) {
+                if (!root) return null;
+                if (root.isContentEditable) return root;
+                if (root.getAttribute && root.getAttribute('contenteditable') != null) return root;
+                return root.querySelector(
+                    '[contenteditable="true"],[contenteditable=""],[contenteditable]'
+                );
+            }
+
+            var editor = findEditable(el);
+            if (!editor) {
+                return { ok: false, reason: 'no contenteditable',
+                         tag: el.tagName, cls: el.className };
+            }
+
+            var doc = editor.ownerDocument || document;
+            var win = doc.defaultView || window;
+
+            editor.focus();
+
+            // 1) 全选已有内容并通过 execCommand 删除 —— 让 Vue 收到真正的 input 事件，
+            //    从而把内部 model 同步成空字符串。
+            var clearOk = false;
+            try {
+                var range = doc.createRange();
+                range.selectNodeContents(editor);
+                var sel = win.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                clearOk = doc.execCommand('delete', false, null);
+            } catch (e) {
+                clearOk = false;
+            }
+            // execCommand 失败兜底：强制把 DOM 清干净
+            if (!clearOk || editor.textContent.length > 0) {
+                editor.innerHTML = '';
+            }
+
+            // 2) 逐行用 execCommand 插入文本
+            var lines = value.split('\n');
+            var usedExec = true;
+            for (var i = 0; i < lines.length; i++) {
+                if (i > 0) {
+                    var brOk = false;
+                    try {
+                        brOk = doc.execCommand('insertLineBreak', false, null);
+                    } catch (e) {
+                        brOk = false;
+                    }
+                    if (!brOk) {
+                        usedExec = false;
+                        // Range 兜底：把 <br> 插到当前光标位置
+                        var s = win.getSelection();
+                        var br = doc.createElement('br');
+                        if (s && s.rangeCount) {
+                            var r = s.getRangeAt(0);
+                            r.insertNode(br);
+                            r.setStartAfter(br);
+                            r.collapse(true);
+                            s.removeAllRanges();
+                            s.addRange(r);
+                        } else {
+                            editor.appendChild(br);
+                        }
+                        editor.dispatchEvent(new InputEvent('input', {
+                            bubbles: true, cancelable: true,
+                            inputType: 'insertLineBreak', data: null
+                        }));
+                    }
+                }
+                if (lines[i]) {
+                    var inserted = false;
+                    try {
+                        inserted = doc.execCommand('insertText', false, lines[i]);
+                    } catch (e) {
+                        inserted = false;
+                    }
+                    if (!inserted) {
+                        usedExec = false;
+                        // Range 兜底：把 textNode 塞到光标位置
+                        var s2 = win.getSelection();
+                        var tn = doc.createTextNode(lines[i]);
+                        if (s2 && s2.rangeCount) {
+                            var r2 = s2.getRangeAt(0);
+                            r2.insertNode(tn);
+                            r2.setStartAfter(tn);
+                            r2.collapse(true);
+                            s2.removeAllRanges();
+                            s2.addRange(r2);
+                        } else {
+                            editor.appendChild(tn);
+                        }
+                        editor.dispatchEvent(new InputEvent('input', {
+                            bubbles: true, cancelable: true,
+                            inputType: 'insertText', data: lines[i]
+                        }));
+                    }
+                }
+            }
+
+            // 3) 兜底再来一发 change，覆盖少数版本只监听 change 的情况
+            try {
+                editor.dispatchEvent(new Event('change', { bubbles: true }));
+            } catch (e) {}
+
+            return {
+                ok: true,
+                used_exec_command: usedExec,
+                text: editor.innerText,
+                html: editor.innerHTML,
+                expected_len: value.length
+            };
+            """
+            result = page.run_js(js, desc_editor, description)
+            preview = description[:30].replace("\n", "\\n")
+
+            if isinstance(result, dict) and result.get("ok"):
+                actual_text = result.get("text") or ""
+                logger.info(
+                    f"描述已写入：{preview}... "
+                    f"(实际文本长度={len(actual_text)} / 期望={result.get('expected_len')}, "
+                    f"execCommand={'是' if result.get('used_exec_command') else '回退Range'})"
+                )
+                return
+
+            # 极端情况：连 DOM 都没塞进去，最后兜底用 DrissionPage 逐字符模拟
+            logger.warning(f"描述写入异常（result={result}），回退到逐字符模拟输入")
+            try:
+                desc_editor.click()
+                self._random_delay(0.1, 0.2)
+                self._human_type(desc_editor, description)
+                logger.info(f"描述已通过逐字符输入兜底写入：{preview}...")
+            except Exception as e:
+                logger.warning(f"逐字符兜底输入也失败：{e}")
         except Exception as e:
             logger.warning(f"描述填写失败: {e}")
 
@@ -353,21 +488,21 @@ class Uploader:
         except Exception as e:
             logger.warning(f"短标题填写失败: {e}")
 
-    def _set_location(self, page: ChromiumPage, location_name: str):
-        """设置位置信息：注入 fetch 拦截器替换坐标 → 点击位置区域 → 搜索 → 选择匹配项"""
+    def _set_location_hidden(self, page: ChromiumPage):
+        """
+        将「位置」固定为列表第一项「不显示位置」。
+
+        自定义位置一直无法稳定生效（视频号会用 IP 反查覆盖坐标），所以这里直接选择「不显示位置」
+        作为默认行为，避免任何位置信息出现在发表后的视频卡片上。
+        """
         try:
-            logger.info(f"正在设置位置: {location_name}")
+            logger.info("将位置强制设为：不显示位置")
 
-            # 1. 注入 fetch 拦截器，将位置搜索 API 的坐标替换为目标城市
-            self._inject_fetch_interceptor(page, 34.640136, 113.593982)
-            self._random_delay(0.5, 1)
-
-            # 3. 点击位置区域展开下拉
             position_display = page.ele("css:.post-position-wrap .position-display", timeout=3)
             if not position_display:
                 position_display = page.ele("css:.position-display", timeout=2)
             if not position_display:
-                logger.warning("未找到位置区域")
+                logger.warning("未找到位置区域，跳过设置")
                 return
 
             if not self._scroll_click_element(page, position_display):
@@ -375,199 +510,39 @@ class Uploader:
                 return
             self._random_delay(0.5, 1)
 
-            # 4. 等待下拉框出现
-            filter_wrap = page.ele("css:.location-filter-wrap", timeout=3)
+            filter_wrap = page.ele("css:.location-filter-wrap", timeout=5)
             if not filter_wrap:
-                logger.warning("未找到位置下拉框")
+                logger.warning("未找到位置下拉框，跳过设置")
                 return
 
-            # 5. 找到搜索框并输入位置关键词
-            search_input = page.ele("css:.location-filter-wrap input[placeholder*='搜索']", timeout=3)
-            if not search_input:
-                search_input = page.ele("css:.location-filter-wrap input", timeout=2)
-            if not search_input:
-                logger.warning("未找到位置搜索框")
-                return
-
-            search_input.click()
-            self._random_delay(0.2, 0.3)
-            try:
-                search_input.clear()
-            except Exception:
-                pass
-            self._human_type(search_input, location_name)
-            self._random_delay(1, 2)
-
-            # 6. 等待位置列表加载并点击匹配项
-            deadline = time.time() + 10.0
+            deadline = time.time() + 8.0
             while time.time() < deadline:
                 items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
+                # 1) 优先按名字匹配「不显示位置」
                 for item in items:
                     try:
                         name_el = item.ele("css:.name", timeout=0.5)
-                        if not name_el:
-                            continue
-                        name_text = (name_el.text or "").strip()
-                        if not name_text or name_text == "不显示位置":
-                            continue
-                        # 优先精确匹配
-                        if name_text == location_name or location_name in name_text:
-                            item.click()
-                            logger.info(f"已选择位置: {name_text}")
-                            return
+                        name_text = ((name_el.text if name_el else "") or "").strip()
+                        if "不显示位置" in name_text or name_text == "不显示":
+                            if self._scroll_click_element(page, item):
+                                logger.info(f"已选择位置：{name_text or '不显示位置'}")
+                                return
                     except Exception:
                         continue
-
-                # 没有精确匹配，选第一个非"不显示位置"的项
-                for item in items:
+                # 2) 兜底：点列表第一项（视频号的「不显示位置」就是 list[0]）
+                if items:
                     try:
-                        name_el = item.ele("css:.name", timeout=0.5)
-                        if not name_el:
-                            continue
-                        name_text = (name_el.text or "").strip()
-                        if name_text and name_text != "不显示位置":
-                            item.click()
-                            logger.info(f"已选择位置（首个匹配）: {name_text}")
+                        if self._scroll_click_element(page, items[0]):
+                            logger.info("已选择位置列表第一项（按设计即「不显示位置」）")
                             return
                     except Exception:
-                        continue
+                        pass
+                self._random_delay(0.3, 0.6)
 
-                self._random_delay(0.5, 1)
-
-            logger.warning(f"未找到匹配的位置: {location_name}")
+            logger.warning("位置列表未加载，无法选择「不显示位置」")
 
         except Exception as e:
-            logger.warning(f"设置位置失败: {e}")
-
-    def _inject_fetch_interceptor(self, page: ChromiumPage, lat: float, lng: float):
-        """注入 fetch 拦截器，将 helper_search_location API 的坐标替换为目标城市坐标"""
-        js = f"""
-        (function() {{
-            var targetLat = {lat};
-            var targetLng = {lng};
-            var origFetch = window.fetch;
-            window.fetch = function(input, init) {{
-                var url = (typeof input === 'string') ? input : (input && input.url) || '';
-                if (url.indexOf('helper_search_location') !== -1 && init && init.body) {{
-                    try {{
-                        var body = JSON.parse(init.body);
-                        body.latitude = targetLat;
-                        body.longitude = targetLng;
-                        init.body = JSON.stringify(body);
-                    }} catch(e) {{}}
-                }}
-                return origFetch.call(this, input, init);
-            }};
-        }})();
-        """
-        try:
-            page.run_js(js)
-            logger.info(f"已注入 fetch 拦截器，目标坐标: {lat}, {lng}")
-        except Exception as e:
-            logger.warning(f"注入 fetch 拦截器失败: {e}")
-
-    def _add_tag(self, page: ChromiumPage, tag_name: str):
-        """通过点击 #话题 按钮添加真实标签"""
-        try:
-            logger.info(f"正在添加标签: {tag_name}")
-
-            # 找到 #话题 按钮（.finder-tag-wrap.btn 中包含 #话题 文本的元素）
-            tag_btn = None
-            tag_buttons = page.eles("css:.finder-tag-wrap.btn", timeout=3)
-            for btn in tag_buttons:
-                if "#话题" in btn.text or "#" in btn.text:
-                    tag_btn = btn
-                    break
-
-            if not tag_btn:
-                logger.warning("未找到 #话题 按钮")
-                return
-
-            # 点击按钮打开标签输入弹窗
-            tag_btn.click()
-            self._random_delay(0.5, 1)
-
-            # 等待标签输入弹窗出现
-            # 弹窗中通常有搜索输入框
-            tag_input = None
-            input_selectors = [
-                "css:.finder-tag-dialog input",
-                "css:.tag-dialog input",
-                "css:.common-dialog input[type='text']",
-                "css:.modal input[type='text']",
-                "css:.ant-modal input",
-                "css:input[placeholder*='搜索']",
-                "css:input[placeholder*='话题']",
-                "css:input[placeholder*='标签']",
-            ]
-            for selector in input_selectors:
-                try:
-                    tag_input = page.ele(selector, timeout=2)
-                    if tag_input:
-                        logger.info(f"找到标签输入框: {selector}")
-                        break
-                except Exception:
-                    continue
-
-            if not tag_input:
-                # 尝试通过 contenteditable 元素查找
-                tag_input = page.ele("css:.finder-tag-dialog [contenteditable], .tag-dialog [contenteditable]", timeout=2)
-
-            if tag_input:
-                # 输入标签名称
-                tag_input.click()
-                self._random_delay(0.2, 0.3)
-                tag_input.clear()
-                self._human_type(tag_input, tag_name)
-                self._random_delay(0.5, 1)
-
-                # 尝试选择第一个搜索结果或按回车确认
-                # 先尝试点击第一个搜索结果
-                result_selectors = [
-                    "css:.finder-tag-dialog .tag-item:first-child",
-                    "css:.tag-dialog .tag-item:first-child",
-                    "css:.common-option-list-wrap .option-item:first-child",
-                    "css:.ant-select-item:first-child",
-                ]
-                for selector in result_selectors:
-                    try:
-                        result = page.ele(selector, timeout=1)
-                        if result:
-                            result.click()
-                            logger.info(f"已选择标签: {tag_name}")
-                            self._random_delay(0.3, 0.5)
-                            return
-                    except Exception:
-                        continue
-
-                # 如果没有搜索结果可点击，尝试按回车确认创建
-                tag_input.input("\n")
-                self._random_delay(0.3, 0.5)
-
-                # 检查是否有确认按钮
-                confirm_selectors = [
-                    "css:.finder-tag-dialog .btn-primary",
-                    "css:.tag-dialog .btn-primary",
-                    "css:.modal .btn-primary:contains('确定')",
-                    "css:.modal .btn-primary:contains('确认')",
-                ]
-                for selector in confirm_selectors:
-                    try:
-                        confirm_btn = page.ele(selector, timeout=1)
-                        if confirm_btn:
-                            confirm_btn.click()
-                            logger.info(f"已确认标签: {tag_name}")
-                            self._random_delay(0.3, 0.5)
-                            return
-                    except Exception:
-                        continue
-
-                logger.info(f"标签 '{tag_name}' 已输入")
-            else:
-                logger.warning("未找到标签输入弹窗")
-
-        except Exception as e:
-            logger.warning(f"添加标签失败: {e}")
+            logger.warning(f"设置「不显示位置」失败: {e}")
 
     def _scroll_click_element(self, page: ChromiumPage, ele) -> bool:
         """滚动到视口内再点击；对文本节点会沿父链多点几次。"""

@@ -62,9 +62,10 @@ from src.publishing.weixin.dao import WeixinDAO
 from src.publishing.weixin.account_manager import AccountManager, CookieChecker
 from src.publishing.weixin.uploader import Uploader
 from src.publishing.weixin.scheduler import UploadScheduler
+from src.publishing.weixin.batch_queue import batch_upload_queue
 from src.publishing.weixin.schemas import (
     AccountCreate, AccountStatus, TaskStatus,
-    UploadTaskCreate, BatchUploadCreate, ScheduleCreate,
+    BatchUploadCreate, ScheduleCreate,
     MetadataSource,
 )
 
@@ -110,6 +111,8 @@ async def lifespan(app):
     weixin_scheduler.start()
     # 启动 Cookie 后台轮询（每小时检查一次）
     weixin_cookie_checker.start()
+    # 启动批量上传串行队列
+    batch_upload_queue.start()
     yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
@@ -117,6 +120,8 @@ async def lifespan(app):
             await repair_task
         except asyncio.CancelledError:
             pass
+    # 停止批量上传队列
+    batch_upload_queue.stop()
     # 停止 Cookie 轮询
     weixin_cookie_checker.stop()
     # 停止视频号调度器
@@ -954,31 +959,6 @@ async def get_download_progress() -> Dict[str, Any]:
     )
 
 
-@app.get("/api/browse-file")
-async def browse_file() -> Dict[str, Any]:
-    """打开系统文件选择器（单个视频文件）"""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected_file = filedialog.askopenfilename(
-            title="选择视频文件",
-            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
-        )
-        root.destroy()
-
-        if not selected_file:
-            return {"status": "cancelled", "message": "未选择文件"}
-
-        return {"status": "success", "path": selected_file}
-    except Exception as e:
-        logger.error(f"❌ 打开文件选择器失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/api/browse-files")
 async def browse_files() -> Dict[str, Any]:
     """打开系统文件选择器（多个视频文件）"""
@@ -1243,71 +1223,20 @@ async def weixin_delete_account(account_id: int) -> Dict[str, Any]:
 
 # ---- 上传任务 ----
 
-@app.post("/api/weixin/upload")
-async def weixin_create_upload_task(request: UploadTaskCreate, background_tasks: BackgroundTasks) -> Dict[str, Any]:
-    """创建单个上传任务"""
-    try:
-        account = weixin_dao.get_account(request.account_id)
-        if not account:
-            raise HTTPException(status_code=404, detail="账号不存在")
-
-        task_id = weixin_dao.create_task(
-            account_id=request.account_id,
-            video_path=request.video_path,
-            title=request.title,
-            description=request.description,
-            tags=request.tags,
-            metadata_source=request.metadata_source.value,
-            scheduled_at=request.scheduled_at.isoformat() if request.scheduled_at else None,
-        )
-
-        if request.scheduled_at:
-            # 定时任务
-            weixin_scheduler.add_one_time_task(
-                task_id=task_id,
-                account_id=request.account_id,
-                video_path=request.video_path,
-                scheduled_at=request.scheduled_at,
-                title=request.title,
-                description=request.description,
-                tags=request.tags,
-                metadata_source=request.metadata_source.value,
-            )
-            return {"status": "scheduled", "task_id": task_id, "scheduled_at": str(request.scheduled_at)}
-        else:
-            # 立即执行
-            def do_upload():
-                weixin_uploader.upload_video(
-                    task_id=task_id,
-                    account_id=request.account_id,
-                    video_path=request.video_path,
-                    title=request.title,
-                    description=request.description,
-                    tags=request.tags,
-                    metadata_source=request.metadata_source.value,
-                    drama_link=request.drama_link,
-                    location_name=request.location_name,
-                )
-
-            background_tasks.add_task(do_upload)
-            return {"status": "started", "task_id": task_id, "message": "上传任务已创建"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"创建上传任务失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/weixin/upload/batch")
-async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: BackgroundTasks) -> Dict[str, Any]:
-    """批量创建上传任务"""
+async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
+    """
+    批量创建上传任务
+
+    本接口仅入队，每个「批量提交」都按提交时间串行执行：
+    前一个批量任务（含其中所有视频）执行完毕后，才会开始下一个批量任务。
+    """
     try:
         account = weixin_dao.get_account(request.account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
-        task_ids = []
+        task_ids: List[int] = []
         for i, video_path in enumerate(request.video_paths):
             title = request.titles[i] if request.titles and i < len(request.titles) else None
             desc = request.descriptions[i] if request.descriptions and i < len(request.descriptions) else None
@@ -1317,45 +1246,71 @@ async def weixin_batch_upload(request: BatchUploadCreate, background_tasks: Back
                 video_path=video_path,
                 title=title,
                 description=desc,
-                tags=request.tags,
+                tags=None,
                 metadata_source=request.metadata_source.value,
             )
             task_ids.append(task_id)
 
-        # 批量上传在后台依次执行
+        account_id = request.account_id
+        metadata_source = request.metadata_source.value
+        drama_link = request.drama_link
+
         def do_batch_upload():
             for idx, task_id in enumerate(task_ids):
                 task = weixin_dao.get_task(task_id)
-                if task:
-                    result = weixin_uploader.upload_video(
-                        task_id=task_id,
-                        account_id=request.account_id,
-                        video_path=task["video_path"],
-                        title=task.get("title"),
-                        description=task.get("description"),
-                        tags=task.get("tags"),
-                        metadata_source=request.metadata_source.value,
-                        drama_link=request.drama_link,
-                        location_name=request.location_name,
+                if not task:
+                    continue
+                result = weixin_uploader.upload_video(
+                    task_id=task_id,
+                    account_id=account_id,
+                    video_path=task["video_path"],
+                    title=task.get("title"),
+                    description=task.get("description"),
+                    metadata_source=metadata_source,
+                    drama_link=drama_link,
+                )
+                if (
+                    result.get("status") == "success"
+                    and idx < len(task_ids) - 1
+                    and WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC > 0
+                ):
+                    logger.info(
+                        f"批量上传：本视频已成功，等待 {WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC} 秒后继续下一个"
                     )
-                    if (
-                        result.get("status") == "success"
-                        and idx < len(task_ids) - 1
-                        and WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC > 0
-                    ):
-                        logger.info(
-                            f"批量上传：本视频已成功，等待 {WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC} 秒后继续下一个"
-                        )
-                        time.sleep(WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC)
+                    time.sleep(WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC)
 
-        background_tasks.add_task(do_batch_upload)
-        return {"status": "started", "task_ids": task_ids, "total": len(task_ids)}
+        enqueue_info = batch_upload_queue.submit(
+            do_batch_upload,
+            label=f"account#{account_id} x{len(task_ids)}",
+        )
+
+        position = enqueue_info["queue_position"]
+        msg = (
+            f"批量任务已入队，共 {len(task_ids)} 个视频；当前队列第 {position} 位"
+            + ("，将立即开始" if position == 1 else "，需等待前序批量任务完成后再开始")
+        )
+        return {
+            "status": "queued",
+            "task_ids": task_ids,
+            "total": len(task_ids),
+            "queue": enqueue_info,
+            "message": msg,
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"批量创建任务失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/upload/batch/queue")
+async def weixin_batch_queue_status() -> Dict[str, Any]:
+    """查看批量上传队列状态：当前正在执行 + 等待中的数量"""
+    return {
+        "status": "success",
+        "queue": batch_upload_queue.snapshot(),
+    }
 
 
 @app.get("/api/weixin/tasks")
@@ -1409,7 +1364,6 @@ async def weixin_retry_task(task_id: int, background_tasks: BackgroundTasks) -> 
                 video_path=task["video_path"],
                 title=task.get("title"),
                 description=task.get("description"),
-                tags=task.get("tags"),
                 metadata_source=task.get("metadata_source", "manual"),
             )
 

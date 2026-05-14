@@ -184,20 +184,19 @@ class UploadScheduler:
             video_path = video_paths[current_index]
             title = None
             description = None
-            tags = task_data.get("tags")
 
             if task_data.get("titles") and current_index < len(task_data["titles"]):
                 title = task_data["titles"][current_index]
             if task_data.get("descriptions") and current_index < len(task_data["descriptions"]):
                 description = task_data["descriptions"][current_index]
 
-            # 创建上传任务
+            # 创建上传任务（tags 已下线，固定写 None）
             task_id = self.dao.create_task(
                 account_id=task_data["account_id"],
                 video_path=video_path,
                 title=title,
                 description=description,
-                tags=tags,
+                tags=None,
                 metadata_source=task_data.get("metadata_source", "manual"),
             )
 
@@ -208,7 +207,6 @@ class UploadScheduler:
                 video_path=video_path,
                 title=title,
                 description=description,
-                tags=tags,
                 metadata_source=task_data.get("metadata_source", "manual"),
             )
 
@@ -242,7 +240,6 @@ class UploadScheduler:
                 video_path=task_data["video_path"],
                 title=task_data.get("title"),
                 description=task_data.get("description"),
-                tags=task_data.get("tags"),
                 metadata_source=task_data.get("metadata_source", "manual"),
             )
 

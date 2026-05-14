@@ -124,18 +124,6 @@ const api = {
     },
 
     /**
-     * 选择单个视频文件
-     */
-    browseFile: async () => {
-        try {
-            const response = await axios.get(`${API_BASE_URL}/browse-file`);
-            return response.data;
-        } catch (error) {
-            throw error.response?.data || error.message;
-        }
-    },
-
-    /**
      * 选择多个视频文件
      */
     browseFiles: async () => {
@@ -258,15 +246,6 @@ const api = {
     getWeixinTasks: async () => {
         try {
             const response = await axios.get(`${API_BASE_URL}/weixin/tasks`);
-            return response.data;
-        } catch (error) {
-            throw error.response?.data || error.message;
-        }
-    },
-
-    createWeixinUpload: async (payload) => {
-        try {
-            const response = await axios.post(`${API_BASE_URL}/weixin/upload`, payload);
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -1368,7 +1347,6 @@ app.component('weixin-page', {
             <!-- 标签页 -->
             <div class="tabs">
                 <div :class="['tab', { active: tab === 'accounts' }]" @click="tab = 'accounts'">账号管理</div>
-                <div :class="['tab', { active: tab === 'upload' }]" @click="tab = 'upload'">上传视频</div>
                 <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
                 <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
                 <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
@@ -1426,70 +1404,6 @@ app.component('weixin-page', {
                 </div>
             </div>
 
-            <!-- 上传视频 -->
-            <div v-if="tab === 'upload'">
-                <div class="card">
-                    <div class="card-title">上传视频</div>
-                    <div class="form-group">
-                        <label>选择账号</label>
-                        <select v-model="uploadForm.account_id">
-                            <option value="">请选择账号</option>
-                            <option v-for="acc in accounts.filter(a => a.status === 'active')" :key="acc.id" :value="acc.id">
-                                {{ acc.name }}
-                            </option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>视频文件</label>
-                        <div class="row">
-                            <div class="col">
-                                <input :value="uploadForm.video_path" type="text" placeholder="请选择视频文件" readonly>
-                            </div>
-                            <div style="display: flex; align-items: end;">
-                                <button class="btn btn-secondary" @click="browseUploadFile" :disabled="isBrowsingUploadFile">
-                                    <span v-if="!isBrowsingUploadFile">选择文件</span>
-                                    <span v-else>选择中...</span>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>元数据来源</label>
-                        <select v-model="uploadForm.metadata_source">
-                            <option value="manual">手动填写</option>
-                            <option value="filename">从文件名读取</option>
-                            <option value="directory">从目录名读取</option>
-                            <option value="ai">AI 自动生成</option>
-                        </select>
-                    </div>
-                    <div v-if="uploadForm.metadata_source === 'manual'">
-                        <div class="form-group">
-                            <label>视频描述</label>
-                            <textarea v-model="uploadForm.description" placeholder="视频描述" rows="4"></textarea>
-                        </div>
-                        <div class="form-group">
-                            <label>标签（用逗号分隔）</label>
-                            <input v-model="uploadForm.tagsStr" type="text" placeholder="标签1, 标签2, 标签3">
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>剧集链接（可选）</label>
-                        <input v-model="uploadForm.drama_link" type="text" placeholder="输入视频号剧集名称">
-                    </div>
-                    <div class="form-group">
-                        <label>位置信息（可选）</label>
-                        <input v-model="uploadForm.location_name" type="text" placeholder="输入位置名称，支持异地位置，如：河南郑州二七广场">
-                    </div>
-                    <div class="form-group">
-                        <label>定时发布（可选）</label>
-                        <input type="datetime-local" v-model="uploadForm.scheduled_at">
-                    </div>
-                    <button class="btn btn-success btn-block" @click="createUploadTask" :disabled="!uploadForm.account_id || !uploadForm.video_path">
-                        {{ uploadForm.scheduled_at ? '定时上传' : '立即上传' }}
-                    </button>
-                </div>
-            </div>
-
             <!-- 批量上传 -->
             <div v-if="tab === 'batch'">
                 <div class="card">
@@ -1532,28 +1446,12 @@ app.component('weixin-page', {
                         </p>
                     </div>
                     <div class="form-group">
-                        <label>标签（所有视频共用，用逗号分隔）</label>
-                        <input v-model="batchForm.tagsStr" type="text" placeholder="标签1, 标签2">
-                    </div>
-                    <div class="form-group">
-                        <label>视频描述（所有视频共用，可选）</label>
-                        <textarea v-model="batchForm.descriptionStr" placeholder="填写后每个任务都会带上该描述；留空则仅按「元数据来源」自动填充描述" rows="3"></textarea>
+                        <label>视频描述（所有视频共用）</label>
+                        <textarea v-model="batchForm.descriptionStr" placeholder="所有视频都会使用该描述" rows="3"></textarea>
                     </div>
                     <div class="form-group">
                         <label>剧集链接（可选）</label>
                         <input v-model="batchForm.drama_link" type="text" placeholder="输入视频号剧集名称">
-                    </div>
-                    <div class="form-group">
-                        <label>位置信息（可选，所有视频共用）</label>
-                        <input v-model="batchForm.location_name" type="text" placeholder="输入位置名称，支持异地位置，如：河南郑州二七广场">
-                    </div>
-                    <div class="form-group">
-                        <label>元数据来源</label>
-                        <select v-model="batchForm.metadata_source">
-                            <option value="manual">手动填写</option>
-                            <option value="filename">从文件名读取</option>
-                            <option value="directory">从目录名读取</option>
-                        </select>
                     </div>
                     <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!batchForm.account_id || batchForm.videoFiles.length === 0">
                         批量上传
@@ -1703,16 +1601,15 @@ app.component('weixin-page', {
         const showAddAccount = ref(false);
         const newAccountName = ref('');
         const refreshingIds = ref(new Set());
-        const isBrowsingUploadFile = ref(false);
         const isBrowsingBatchFiles = ref(false);
         const message = reactive({ show: false, type: 'info', text: '' });
 
-        const uploadForm = reactive({
-            account_id: '', video_path: '', description: '',
-            tagsStr: '', metadata_source: 'manual', scheduled_at: '', drama_link: '', location_name: ''
-        });
+        const DEFAULT_BATCH_DESCRIPTION = '#ys点击上方❤【免费剧集】0元看全集';
         const batchForm = reactive({
-            account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual', drama_link: '', location_name: ''
+            account_id: '',
+            videoFiles: [],
+            descriptionStr: DEFAULT_BATCH_DESCRIPTION,
+            drama_link: ''
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -1851,21 +1748,6 @@ app.component('weixin-page', {
             }
         }
 
-        async function browseUploadFile() {
-            if (isBrowsingUploadFile.value) return;
-            isBrowsingUploadFile.value = true;
-            try {
-                const res = await props.api.browseFile();
-                if (res.status === 'success' && res.path) {
-                    uploadForm.video_path = res.path;
-                }
-            } catch (e) {
-                showMessage('选择文件失败: ' + (e.message || e), 'error');
-            } finally {
-                isBrowsingUploadFile.value = false;
-            }
-        }
-
         async function browseBatchFiles() {
             if (isBrowsingBatchFiles.value) return;
             isBrowsingBatchFiles.value = true;
@@ -1889,40 +1771,12 @@ app.component('weixin-page', {
             batchForm.videoFiles.splice(idx, 1);
         }
 
-        async function createUploadTask() {
-            try {
-                const tags = uploadForm.tagsStr ? uploadForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
-                const payload = {
-                    account_id: parseInt(uploadForm.account_id),
-                    video_path: uploadForm.video_path,
-                    title: null,
-                    description: uploadForm.description || null,
-                    tags: tags.length ? tags : null,
-                    metadata_source: uploadForm.metadata_source,
-                    scheduled_at: uploadForm.scheduled_at ? new Date(uploadForm.scheduled_at).toISOString() : null,
-                    drama_link: uploadForm.drama_link || null,
-                    location_name: uploadForm.location_name || null,
-                };
-                const res = await props.api.createWeixinUpload(payload);
-                showMessage(res.message || '任务已创建', 'success');
-                uploadForm.video_path = '';
-                uploadForm.description = '';
-                uploadForm.tagsStr = '';
-                uploadForm.scheduled_at = '';
-                uploadForm.drama_link = '';
-                uploadForm.location_name = '';
-            } catch (e) {
-                showMessage('创建失败: ' + (e.message || e), 'error');
-            }
-        }
-
         async function createBatchUpload() {
             try {
                 if (!batchForm.videoFiles.length) {
                     showMessage('请选择视频文件', 'error');
                     return;
                 }
-                const tags = batchForm.tagsStr ? batchForm.tagsStr.split(',').map(t => t.trim()).filter(Boolean) : [];
                 const descTrim = (batchForm.descriptionStr || '').trim();
                 const descriptions = descTrim
                     ? batchForm.videoFiles.map(() => descTrim)
@@ -1931,17 +1785,14 @@ app.component('weixin-page', {
                     account_id: parseInt(batchForm.account_id),
                     video_paths: batchForm.videoFiles,
                     descriptions,
-                    tags: tags.length ? tags : null,
-                    metadata_source: batchForm.metadata_source,
+                    metadata_source: 'manual',
                     drama_link: batchForm.drama_link || null,
-                    location_name: batchForm.location_name || null,
                 });
-                showMessage('批量任务已创建，共 ' + res.total + ' 个', 'success');
+                const totalText = typeof res.total === 'number' ? res.total : batchForm.videoFiles.length;
+                showMessage(res.message || ('批量任务已创建，共 ' + totalText + ' 个'), 'success');
                 batchForm.videoFiles = [];
-                batchForm.tagsStr = '';
-                batchForm.descriptionStr = '';
+                batchForm.descriptionStr = DEFAULT_BATCH_DESCRIPTION;
                 batchForm.drama_link = '';
-                batchForm.location_name = '';
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
             }
@@ -2013,14 +1864,14 @@ app.component('weixin-page', {
 
         return {
             tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds,
-            isBrowsingUploadFile, isBrowsingBatchFiles,
-            uploadForm, batchForm, scheduleForm,
+            isBrowsingBatchFiles,
+            batchForm, scheduleForm,
             formatDate, getFileName, getAccountName,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
             loadAccounts, loadTasks, loadSchedules,
             addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
-            browseUploadFile, browseBatchFiles, removeBatchFile,
-            createUploadTask, createBatchUpload,
+            browseBatchFiles, removeBatchFile,
+            createBatchUpload,
             retryTask, deleteTask,
             createSchedule, deleteSchedule, showMessage
         };

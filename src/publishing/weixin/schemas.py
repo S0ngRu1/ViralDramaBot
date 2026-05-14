@@ -50,34 +50,17 @@ class AccountInfo(BaseModel):
     last_login_at: Optional[datetime] = None
 
 
-class UploadTaskCreate(BaseModel):
-    """创建上传任务请求"""
-    account_id: int = Field(..., description="账号ID")
-    video_path: str = Field(..., description="视频文件路径")
-    title: Optional[str] = Field(None, max_length=50, description="标题")
-    description: Optional[str] = Field(None, max_length=1000, description="描述")
-    tags: Optional[list[str]] = Field(None, description="标签列表")
-    metadata_source: MetadataSource = Field(
-        MetadataSource.MANUAL, description="元数据来源"
-    )
-    scheduled_at: Optional[datetime] = Field(None, description="定时发布时间")
-    drama_link: Optional[str] = Field(None, description="视频号剧集名称")
-    location_name: Optional[str] = Field(None, description="位置名称")
-
-
 class BatchUploadCreate(BaseModel):
     """批量创建上传任务请求"""
     account_id: int = Field(..., description="账号ID")
     video_paths: list[str] = Field(..., min_length=1, max_length=50, description="视频文件路径列表")
     titles: Optional[list[str]] = Field(None, description="标题列表")
     descriptions: Optional[list[str]] = Field(None, description="描述列表")
-    tags: Optional[list[str]] = Field(None, description="统一标签")
     metadata_source: MetadataSource = Field(
         MetadataSource.MANUAL, description="元数据来源"
     )
     scheduled_at: Optional[datetime] = Field(None, description="定时发布时间（第一个视频的时间，后续依次递增）")
     drama_link: Optional[str] = Field(None, description="视频号剧集名称")
-    location_name: Optional[str] = Field(None, description="位置名称")
 
 
 class TaskInfo(BaseModel):
