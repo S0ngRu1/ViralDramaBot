@@ -294,11 +294,31 @@
                     <div class="card">
                         <div class="flex justify-between items-center" style="margin-bottom: 16px;">
                             <h3>上传任务</h3>
-                            <button class="btn btn-sm" @click="loadTasks()">刷新</button>
+                            <div class="flex gap-2 items-center">
+                                <span v-if="selectedTaskIds.length" style="color: #666; font-size: 13px;">
+                                    已选 {{ selectedTaskIds.length }} 项
+                                </span>
+                                <button
+                                    class="btn btn-danger btn-sm"
+                                    :disabled="!selectedTaskIds.length"
+                                    @click="deleteSelectedTasks()"
+                                >删除选中</button>
+                                <button class="btn btn-sm" @click="loadTasks()">刷新</button>
+                            </div>
                         </div>
                         <table class="table" v-if="tasks.length">
                             <thead>
                                 <tr>
+                                    <th style="width: 36px;">
+                                        <input
+                                            type="checkbox"
+                                            :checked="isAllSelectableSelected"
+                                            :indeterminate.prop="isPartiallySelected"
+                                            :disabled="!selectableTaskIds.length"
+                                            @change="toggleSelectAllTasks($event.target.checked)"
+                                            title="全选当前列表中可删除的任务"
+                                        />
+                                    </th>
                                     <th>ID</th>
                                     <th>账号</th>
                                     <th>视频</th>
@@ -310,6 +330,15 @@
                             </thead>
                             <tbody>
                                 <tr v-for="task in tasks" :key="task.id">
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            :value="task.id"
+                                            v-model="selectedTaskIds"
+                                            :disabled="isTaskActive(task.status)"
+                                            :title="isTaskActive(task.status) ? '正在执行中，无法删除' : ''"
+                                        />
+                                    </td>
                                     <td>{{ task.id }}</td>
                                     <td>{{ getAccountName(task.account_id) }}</td>
                                     <td>{{ getFileName(task.video_path) }}</td>
@@ -425,7 +454,10 @@
     </div>
 
     <script>
-    const { createApp, ref, reactive, onMounted } = Vue;
+    const { createApp, ref, reactive, computed, onMounted } = Vue;
+    // 任务的「进行中」状态：上传 / 处理 / 填写 / 发布。这些状态的任务不允许批量删除，
+    // 否则会让仍在跑的浏览器自动化任务变成孤儿任务。
+    const ACTIVE_TASK_STATUSES = ['uploading', 'processing', 'filling', 'publishing'];
     const API = 'http://localhost:8000/api/weixin';
 
     createApp({
@@ -433,6 +465,7 @@
             const tab = ref('accounts');
             const accounts = ref([]);
             const tasks = ref([]);
+            const selectedTaskIds = ref([]);
             const schedules = ref([]);
             const showAddAccount = ref(false);
             const newAccountName = ref('');
@@ -500,7 +533,47 @@
                 try {
                     const res = await axios.get(`${API}/tasks`);
                     tasks.value = res.data.tasks || [];
+                    // 列表更新后，把已选 ID 收敛到当前列表里仍存在且仍可删的任务
+                    const allowed = new Set(
+                        tasks.value
+                            .filter(t => !isTaskActive(t.status))
+                            .map(t => t.id)
+                    );
+                    selectedTaskIds.value = selectedTaskIds.value.filter(id => allowed.has(id));
                 } catch (e) { console.error(e); }
+            }
+
+            function isTaskActive(status) {
+                return ACTIVE_TASK_STATUSES.includes(status);
+            }
+
+            const selectableTaskIds = computed(() =>
+                tasks.value.filter(t => !isTaskActive(t.status)).map(t => t.id)
+            );
+            const isAllSelectableSelected = computed(() =>
+                selectableTaskIds.value.length > 0 &&
+                selectableTaskIds.value.every(id => selectedTaskIds.value.includes(id))
+            );
+            const isPartiallySelected = computed(() =>
+                selectedTaskIds.value.length > 0 && !isAllSelectableSelected.value
+            );
+
+            function toggleSelectAllTasks(checked) {
+                selectedTaskIds.value = checked ? [...selectableTaskIds.value] : [];
+            }
+
+            async function deleteSelectedTasks() {
+                const ids = [...selectedTaskIds.value];
+                if (!ids.length) return;
+                if (!confirm(`确定删除已选中的 ${ids.length} 个任务？`)) return;
+                try {
+                    const res = await axios.post(`${API}/tasks/batch-delete`, { task_ids: ids });
+                    selectedTaskIds.value = [];
+                    await loadTasks();
+                    showMessage(res.data.message || '批量删除完成', 'success');
+                } catch (e) {
+                    showMessage('批量删除失败: ' + (e.response?.data?.detail || e.message), 'error');
+                }
             }
             async function loadSchedules() {
                 try {
@@ -671,11 +744,13 @@
             onMounted(() => { loadAccounts(); loadSchedules(); });
 
             return {
-                tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds,
+                tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, message, refreshingIds,
                 isBrowsingUploadFile, isBrowsingBatchFiles,
                 uploadForm, batchForm, scheduleForm,
                 formatDate, getFileName, getAccountName,
                 getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
+                isTaskActive, selectableTaskIds, isAllSelectableSelected, isPartiallySelected,
+                toggleSelectAllTasks, deleteSelectedTasks,
                 loadAccounts, loadTasks, loadSchedules,
                 addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
                 browseUploadFile, browseBatchFiles, removeBatchFile,

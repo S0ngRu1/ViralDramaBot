@@ -78,6 +78,11 @@ class TaskInfo(BaseModel):
     error_msg: Optional[str] = None
 
 
+class TaskBatchDeleteRequest(BaseModel):
+    """批量删除任务请求"""
+    task_ids: list[int] = Field(..., min_length=1, max_length=500, description="待删除的任务 ID 列表")
+
+
 class ScheduleCreate(BaseModel):
     """创建定时计划请求"""
     account_id: int = Field(..., description="账号ID")

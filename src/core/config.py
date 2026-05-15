@@ -25,6 +25,11 @@ class Config:
     DEFAULT_WEIXIN_UPLOAD_TIMEOUT = 600
     DEFAULT_WEIXIN_INTER_UPLOAD_COOLDOWN = 20
     DEFAULT_WEIXIN_MAX_RETRIES = 3
+    DEFAULT_WEIXIN_PROXY_ENABLED = False
+    DEFAULT_WEIXIN_PROXY_SCHEME = "http"
+    DEFAULT_WEIXIN_PROXY_HOST = "127.0.0.1"
+    DEFAULT_WEIXIN_PROXY_PORT = 0
+    DEFAULT_WEIXIN_LOCATION_MODE = "proxy_ip"
 
     def __init__(self):
         """初始化配置"""
@@ -51,9 +56,31 @@ class Config:
         self.weixin_max_retries = int(
             os.getenv('WEIXIN_MAX_RETRIES', str(self.DEFAULT_WEIXIN_MAX_RETRIES))
         )
+        self.weixin_proxy_enabled = self._env_bool(
+            'WEIXIN_PROXY_ENABLED', self.DEFAULT_WEIXIN_PROXY_ENABLED
+        )
+        self.weixin_proxy_scheme = os.getenv(
+            'WEIXIN_PROXY_SCHEME', self.DEFAULT_WEIXIN_PROXY_SCHEME
+        ).lower()
+        self.weixin_proxy_host = os.getenv(
+            'WEIXIN_PROXY_HOST', self.DEFAULT_WEIXIN_PROXY_HOST
+        )
+        self.weixin_proxy_port = int(
+            os.getenv('WEIXIN_PROXY_PORT', str(self.DEFAULT_WEIXIN_PROXY_PORT))
+        )
+        self.weixin_location_mode = os.getenv(
+            'WEIXIN_LOCATION_MODE', self.DEFAULT_WEIXIN_LOCATION_MODE
+        ).lower()
 
         # 将工作目录转换为 Path 对象
         self.work_path = Path(self.work_dir)
+
+    @staticmethod
+    def _env_bool(name: str, default: bool = False) -> bool:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "on"}
     
     def validate_environment(self) -> bool:
         """
@@ -132,7 +159,12 @@ class Config:
         max_retries: int | None = None,
         weixin_upload_timeout: int | None = None,
         weixin_inter_upload_cooldown: int | None = None,
-        weixin_max_retries: int | None = None
+        weixin_max_retries: int | None = None,
+        weixin_proxy_enabled: bool | None = None,
+        weixin_proxy_scheme: str | None = None,
+        weixin_proxy_host: str | None = None,
+        weixin_proxy_port: int | None = None,
+        weixin_location_mode: str | None = None
     ) -> dict:
         """
         更新运行时配置
@@ -167,6 +199,21 @@ class Config:
         if weixin_max_retries is not None:
             self.weixin_max_retries = int(weixin_max_retries)
 
+        if weixin_proxy_enabled is not None:
+            self.weixin_proxy_enabled = bool(weixin_proxy_enabled)
+
+        if weixin_proxy_scheme is not None:
+            self.weixin_proxy_scheme = str(weixin_proxy_scheme).strip().lower()
+
+        if weixin_proxy_host is not None:
+            self.weixin_proxy_host = str(weixin_proxy_host).strip()
+
+        if weixin_proxy_port is not None:
+            self.weixin_proxy_port = int(weixin_proxy_port)
+
+        if weixin_location_mode is not None:
+            self.weixin_location_mode = str(weixin_location_mode).strip().lower()
+
         if not self.initialize_work_dir():
             raise ValueError(f"无法访问工作目录: {self.work_dir}")
 
@@ -180,7 +227,12 @@ class Config:
             "max_retries": int(self.max_retries),
             "weixin_upload_timeout": int(self.weixin_upload_timeout),
             "weixin_inter_upload_cooldown": int(self.weixin_inter_upload_cooldown),
-            "weixin_max_retries": int(self.weixin_max_retries)
+            "weixin_max_retries": int(self.weixin_max_retries),
+            "weixin_proxy_enabled": bool(self.weixin_proxy_enabled),
+            "weixin_proxy_scheme": str(self.weixin_proxy_scheme),
+            "weixin_proxy_host": str(self.weixin_proxy_host),
+            "weixin_proxy_port": int(self.weixin_proxy_port),
+            "weixin_location_mode": str(self.weixin_location_mode)
         }
 
 

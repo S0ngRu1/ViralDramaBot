@@ -13,7 +13,7 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from DrissionPage import ChromiumPage
 
-from .browser import get_browser_for_account, get_browser_for_channels_viewer
+from .browser import apply_weixin_proxy, get_browser_for_account, get_browser_for_channels_viewer
 from .config import WeixinConfig
 from DrissionPage import ChromiumOptions
 from .dao import WeixinDAO
@@ -371,6 +371,7 @@ class AccountManager:
         options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--no-sandbox")
+        apply_weixin_proxy(options)
         user_data_dir = str(
             WeixinConfig.COOKIES_DIR / f"profile_{hash(cookie_path)}"
         )

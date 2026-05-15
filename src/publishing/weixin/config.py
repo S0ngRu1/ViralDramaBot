@@ -44,6 +44,17 @@ class WeixinConfig:
 
     # 定时调度配置
     SCHEDULER_TIMEZONE = "Asia/Shanghai"
+    PROXY_ENABLED = os.getenv("WEIXIN_PROXY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    PROXY_SCHEME = os.getenv("WEIXIN_PROXY_SCHEME", "http").strip().lower()
+    PROXY_HOST = os.getenv("WEIXIN_PROXY_HOST", "127.0.0.1").strip()
+    PROXY_PORT = int(os.getenv("WEIXIN_PROXY_PORT", "0") or "0")
+    LOCATION_MODE = os.getenv("WEIXIN_LOCATION_MODE", "proxy_ip").strip().lower()
+
+    @classmethod
+    def proxy_url(cls) -> str:
+        if not cls.PROXY_ENABLED or not cls.PROXY_HOST or not cls.PROXY_PORT:
+            return ""
+        return f"{cls.PROXY_SCHEME}://{cls.PROXY_HOST}:{cls.PROXY_PORT}"
 
     @classmethod
     def ensure_dirs(cls):

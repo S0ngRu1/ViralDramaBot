@@ -173,6 +173,15 @@ const api = {
         }
     },
 
+    testWeixinProxy: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/proxy/test`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     /**
      * 获取应用状态
      */
@@ -273,6 +282,17 @@ const api = {
     deleteWeixinTask: async (id) => {
         try {
             const response = await axios.delete(`${API_BASE_URL}/weixin/tasks/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    batchDeleteWeixinTasks: async (taskIds) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/tasks/batch-delete`, {
+                task_ids: taskIds,
+            });
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -402,7 +422,12 @@ const app = createApp({
             max_retries: 3,
             weixin_upload_timeout: 600,
             weixin_inter_upload_cooldown: 20,
-            weixin_max_retries: 3
+            weixin_max_retries: 3,
+            weixin_proxy_enabled: false,
+            weixin_proxy_scheme: 'http',
+            weixin_proxy_host: '127.0.0.1',
+            weixin_proxy_port: 0,
+            weixin_location_mode: 'proxy_ip'
         });
         const messages = ref([]);
 
@@ -1252,6 +1277,55 @@ app.component('settings-page', {
                     </p>
                 </div>
 
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" v-model="formData.weixin_proxy_enabled" />
+                        Weixin upload proxy
+                    </label>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        Use Aijiasu manual HTTP/Socks5 local proxy for login and upload browser traffic.
+                    </p>
+                </div>
+
+                <div class="row">
+                    <div class="col">
+                        <div class="form-group">
+                            <label>Proxy scheme</label>
+                            <select v-model="formData.weixin_proxy_scheme">
+                                <option value="http">HTTP</option>
+                                <option value="socks5">Socks5</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="form-group">
+                            <label>Proxy host</label>
+                            <input v-model.trim="formData.weixin_proxy_host" placeholder="127.0.0.1" />
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="form-group">
+                            <label>Proxy port</label>
+                            <input v-model.number="formData.weixin_proxy_port" type="number" min="0" max="65535" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Location mode</label>
+                    <select v-model="formData.weixin_location_mode">
+                        <option value="proxy_ip">Show by proxy IP</option>
+                        <option value="hidden">Hide location</option>
+                    </select>
+                </div>
+
+                <button class="btn btn-secondary" @click="testProxy" :disabled="isTestingProxy">
+                    {{ isTestingProxy ? 'Testing...' : 'Test proxy location' }}
+                </button>
+                <p v-if="proxyTestResult" class="text-muted" style="font-size: 12px; margin-top: 8px;">
+                    {{ proxyTestResult }}
+                </p>
+
                 <button
                     class="btn btn-primary btn-block"
                     @click="save"
@@ -1288,9 +1362,16 @@ app.component('settings-page', {
             max_retries: props.settings.max_retries,
             weixin_upload_timeout: props.settings.weixin_upload_timeout || 600,
             weixin_inter_upload_cooldown: props.settings.weixin_inter_upload_cooldown || 20,
-            weixin_max_retries: props.settings.weixin_max_retries || 3
+            weixin_max_retries: props.settings.weixin_max_retries || 3,
+            weixin_proxy_enabled: !!props.settings.weixin_proxy_enabled,
+            weixin_proxy_scheme: props.settings.weixin_proxy_scheme || 'http',
+            weixin_proxy_host: props.settings.weixin_proxy_host || '127.0.0.1',
+            weixin_proxy_port: props.settings.weixin_proxy_port || 0,
+            weixin_location_mode: props.settings.weixin_location_mode || 'proxy_ip'
         });
         const isBrowsing = ref(false);
+        const isTestingProxy = ref(false);
+        const proxyTestResult = ref('');
 
         const browseVideoDir = async () => {
             if (isBrowsing.value) return;
@@ -1317,11 +1398,35 @@ app.component('settings-page', {
             }
         };
 
+        const testProxy = async () => {
+            if (isTestingProxy.value) return;
+            proxyTestResult.value = '';
+            isTestingProxy.value = true;
+            try {
+                await props.api.updateSettings(formData);
+                const result = await props.api.testWeixinProxy();
+                if (result.status === 'success') {
+                    const proxy = result.result?.proxy || {};
+                    const location = [proxy.country, proxy.region, proxy.city].filter(Boolean).join(' ');
+                    proxyTestResult.value = `OK: ${proxy.ip || '-'} ${location || ''}`;
+                } else {
+                    proxyTestResult.value = `Failed: ${result.message || 'proxy unavailable'}`;
+                }
+            } catch (error) {
+                proxyTestResult.value = 'Failed: ' + (error.detail || error.message || error);
+            } finally {
+                isTestingProxy.value = false;
+            }
+        };
+
         return {
             formData,
             isBrowsing,
+            isTestingProxy,
+            proxyTestResult,
             browseVideoDir,
-            save
+            save,
+            testProxy
         };
     }
 });
@@ -1464,11 +1569,31 @@ app.component('weixin-page', {
                 <div class="card">
                     <div class="flex-between" style="margin-bottom: 16px;">
                         <div class="card-title" style="margin-bottom: 0;">上传任务</div>
-                        <button class="btn btn-secondary btn-small" @click="loadTasks()">刷新</button>
+                        <div class="action-group">
+                            <span v-if="selectedTaskIds.length" style="color: #666; font-size: 13px;">
+                                已选 {{ selectedTaskIds.length }} 项
+                            </span>
+                            <button
+                                class="btn btn-danger btn-small"
+                                :disabled="!selectedTaskIds.length"
+                                @click="deleteSelectedTasks()"
+                            >删除选中</button>
+                            <button class="btn btn-secondary btn-small" @click="loadTasks()">刷新</button>
+                        </div>
                     </div>
                     <table class="table" v-if="tasks.length">
                         <thead>
                             <tr>
+                                <th style="width: 36px;">
+                                    <input
+                                        type="checkbox"
+                                        :checked="isAllSelectableSelected"
+                                        :indeterminate.prop="isPartiallySelected"
+                                        :disabled="!selectableTaskIds.length"
+                                        @change="toggleSelectAllTasks($event.target.checked)"
+                                        title="全选当前列表中可删除的任务"
+                                    />
+                                </th>
                                 <th>ID</th>
                                 <th>账号</th>
                                 <th>视频</th>
@@ -1480,6 +1605,15 @@ app.component('weixin-page', {
                         </thead>
                         <tbody>
                             <tr v-for="task in tasks" :key="task.id">
+                                <td>
+                                    <input
+                                        type="checkbox"
+                                        :value="task.id"
+                                        v-model="selectedTaskIds"
+                                        :disabled="isTaskActive(task.status)"
+                                        :title="isTaskActive(task.status) ? '正在执行中，无法删除' : ''"
+                                    />
+                                </td>
                                 <td>{{ task.id }}</td>
                                 <td>{{ getAccountName(task.account_id) }}</td>
                                 <td>{{ getFileName(task.video_path) }}</td>
@@ -1594,9 +1728,14 @@ app.component('weixin-page', {
     `,
 
     setup(props) {
+        // 任务的「进行中」状态：上传 / 处理 / 填写 / 发布。
+        // 这些状态的任务不允许批量删除，否则会让仍在跑的浏览器自动化任务变成孤儿任务。
+        const ACTIVE_TASK_STATUSES = ['uploading', 'processing', 'filling', 'publishing'];
+
         const tab = ref('accounts');
         const accounts = ref([]);
         const tasks = ref([]);
+        const selectedTaskIds = ref([]);
         const schedules = ref([]);
         const showAddAccount = ref(false);
         const newAccountName = ref('');
@@ -1680,8 +1819,48 @@ app.component('weixin-page', {
             try {
                 const res = await props.api.getWeixinTasks();
                 tasks.value = res.tasks || [];
+                // 列表更新后，把已选 ID 收敛到当前列表里仍存在且仍可删的任务
+                const allowed = new Set(
+                    tasks.value
+                        .filter(t => !isTaskActive(t.status))
+                        .map(t => t.id)
+                );
+                selectedTaskIds.value = selectedTaskIds.value.filter(id => allowed.has(id));
             } catch (e) {
                 console.error(e);
+            }
+        }
+
+        function isTaskActive(status) {
+            return ACTIVE_TASK_STATUSES.includes(status);
+        }
+
+        const selectableTaskIds = computed(() =>
+            tasks.value.filter(t => !isTaskActive(t.status)).map(t => t.id)
+        );
+        const isAllSelectableSelected = computed(() =>
+            selectableTaskIds.value.length > 0 &&
+            selectableTaskIds.value.every(id => selectedTaskIds.value.includes(id))
+        );
+        const isPartiallySelected = computed(() =>
+            selectedTaskIds.value.length > 0 && !isAllSelectableSelected.value
+        );
+
+        function toggleSelectAllTasks(checked) {
+            selectedTaskIds.value = checked ? [...selectableTaskIds.value] : [];
+        }
+
+        async function deleteSelectedTasks() {
+            const ids = [...selectedTaskIds.value];
+            if (!ids.length) return;
+            if (!confirm(`确定删除已选中的 ${ids.length} 个任务？`)) return;
+            try {
+                const res = await props.api.batchDeleteWeixinTasks(ids);
+                selectedTaskIds.value = [];
+                await loadTasks();
+                showMessage(res.message || '批量删除完成', 'success');
+            } catch (e) {
+                showMessage('批量删除失败: ' + (e.detail || e.message || e), 'error');
             }
         }
 
@@ -1863,11 +2042,13 @@ app.component('weixin-page', {
         });
 
         return {
-            tab, accounts, tasks, schedules, showAddAccount, newAccountName, message, refreshingIds,
+            tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, message, refreshingIds,
             isBrowsingBatchFiles,
             batchForm, scheduleForm,
             formatDate, getFileName, getAccountName,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
+            isTaskActive, selectableTaskIds, isAllSelectableSelected, isPartiallySelected,
+            toggleSelectAllTasks, deleteSelectedTasks,
             loadAccounts, loadTasks, loadSchedules,
             addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
             browseBatchFiles, removeBatchFile,

@@ -258,6 +258,54 @@ class WeixinDAO:
             cursor = conn.execute("DELETE FROM upload_tasks WHERE id = ?", (task_id,))
             return cursor.rowcount > 0
 
+    def delete_tasks(self, task_ids: list[int]) -> dict:
+        """
+        批量删除任务。跳过活动状态（uploading/processing/filling/publishing）的任务，
+        避免误删正在跑的浏览器自动化任务而导致状态错乱。
+
+        Returns:
+            dict: {
+                "deleted_ids": [int],           # 实际被删除的 id
+                "skipped_active": [int],        # 因处于活动状态而被跳过的 id
+                "not_found": [int],             # 数据库里不存在的 id
+            }
+        """
+        if not task_ids:
+            return {"deleted_ids": [], "skipped_active": [], "not_found": []}
+
+        unique_ids = list({int(i) for i in task_ids})
+        active_statuses = (
+            TaskStatus.UPLOADING.value,
+            TaskStatus.PROCESSING.value,
+            TaskStatus.FILLING.value,
+            TaskStatus.PUBLISHING.value,
+        )
+
+        with self._get_conn() as conn:
+            placeholders = ",".join("?" for _ in unique_ids)
+            rows = conn.execute(
+                f"SELECT id, status FROM upload_tasks WHERE id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+            existing = {row["id"]: row["status"] for row in rows}
+
+            deletable = [i for i, st in existing.items() if st not in active_statuses]
+            skipped_active = [i for i, st in existing.items() if st in active_statuses]
+            not_found = [i for i in unique_ids if i not in existing]
+
+            if deletable:
+                del_placeholders = ",".join("?" for _ in deletable)
+                conn.execute(
+                    f"DELETE FROM upload_tasks WHERE id IN ({del_placeholders})",
+                    deletable,
+                )
+
+        return {
+            "deleted_ids": deletable,
+            "skipped_active": skipped_active,
+            "not_found": not_found,
+        }
+
     def has_active_task(self, account_id: int) -> bool:
         """检查指定账号是否有正在执行的上传任务（UPLOADING/PROCESSING/FILLING/PUBLISHING）"""
         active_statuses = (

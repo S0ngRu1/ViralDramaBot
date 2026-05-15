@@ -63,10 +63,11 @@ from src.publishing.weixin.account_manager import AccountManager, CookieChecker
 from src.publishing.weixin.uploader import Uploader
 from src.publishing.weixin.scheduler import UploadScheduler
 from src.publishing.weixin.batch_queue import batch_upload_queue
+from src.publishing.weixin.proxy import ProxyCheckError, check_configured_proxy
 from src.publishing.weixin.schemas import (
     AccountCreate, AccountStatus, TaskStatus,
     BatchUploadCreate, ScheduleCreate,
-    MetadataSource,
+    MetadataSource, TaskBatchDeleteRequest,
 )
 
 # ===== 新增：数据目录自动适配 =====
@@ -107,6 +108,11 @@ async def lifespan(app):
     WeixinConfig.UPLOAD_TIMEOUT = config.weixin_upload_timeout
     WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC = config.weixin_inter_upload_cooldown
     WeixinConfig.MAX_RETRIES = config.weixin_max_retries
+    WeixinConfig.PROXY_ENABLED = config.weixin_proxy_enabled
+    WeixinConfig.PROXY_SCHEME = config.weixin_proxy_scheme
+    WeixinConfig.PROXY_HOST = config.weixin_proxy_host
+    WeixinConfig.PROXY_PORT = config.weixin_proxy_port
+    WeixinConfig.LOCATION_MODE = config.weixin_location_mode
     # 启动视频号定时调度器
     weixin_scheduler.start()
     # 启动 Cookie 后台轮询（每小时检查一次）
@@ -216,6 +222,11 @@ class AppSettings(BaseModel):
     weixin_upload_timeout: int = 600
     weixin_inter_upload_cooldown: int = 20
     weixin_max_retries: int = 3
+    weixin_proxy_enabled: bool = False
+    weixin_proxy_scheme: str = "http"
+    weixin_proxy_host: str = "127.0.0.1"
+    weixin_proxy_port: int = 0
+    weixin_location_mode: str = "proxy_ip"
 
 
 class DownloadProgress(BaseModel):
@@ -1074,6 +1085,13 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
             raise ValueError("视频号上传超时不能小于 60 秒")
 
         # 验证目录存在
+        if settings.weixin_proxy_scheme not in {"http", "socks5"}:
+            raise ValueError("Weixin proxy scheme must be http or socks5")
+        if settings.weixin_proxy_enabled and not (1 <= settings.weixin_proxy_port <= 65535):
+            raise ValueError("Weixin proxy port must be between 1 and 65535")
+        if settings.weixin_location_mode not in {"proxy_ip", "hidden"}:
+            raise ValueError("Weixin location mode must be proxy_ip or hidden")
+
         video_path = Path(settings.video_dir)
         video_path.mkdir(parents=True, exist_ok=True)
 
@@ -1084,7 +1102,12 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
             max_retries=settings.max_retries,
             weixin_upload_timeout=settings.weixin_upload_timeout,
             weixin_inter_upload_cooldown=settings.weixin_inter_upload_cooldown,
-            weixin_max_retries=settings.weixin_max_retries
+            weixin_max_retries=settings.weixin_max_retries,
+            weixin_proxy_enabled=settings.weixin_proxy_enabled,
+            weixin_proxy_scheme=settings.weixin_proxy_scheme,
+            weixin_proxy_host=settings.weixin_proxy_host,
+            weixin_proxy_port=settings.weixin_proxy_port,
+            weixin_location_mode=settings.weixin_location_mode
         )
         get_downloader().configure(
             download_timeout=settings.download_timeout,
@@ -1095,6 +1118,11 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
         WeixinConfig.UPLOAD_TIMEOUT = config.weixin_upload_timeout
         WeixinConfig.INTER_UPLOAD_COOLDOWN_SEC = config.weixin_inter_upload_cooldown
         WeixinConfig.MAX_RETRIES = config.weixin_max_retries
+        WeixinConfig.PROXY_ENABLED = config.weixin_proxy_enabled
+        WeixinConfig.PROXY_SCHEME = config.weixin_proxy_scheme
+        WeixinConfig.PROXY_HOST = config.weixin_proxy_host
+        WeixinConfig.PROXY_PORT = config.weixin_proxy_port
+        WeixinConfig.LOCATION_MODE = config.weixin_location_mode
 
         logger.info(f"✅ 应用设置已更新: {settings}")
 
@@ -1117,6 +1145,21 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
 # ============================================================================
 
 # ---- 账号管理 ----
+
+@app.get("/api/weixin/proxy/test")
+async def test_weixin_proxy() -> Dict[str, Any]:
+    """Test the configured Weixin upload proxy and return detected IP location."""
+    try:
+        result = check_configured_proxy(strict_same_ip=True)
+        if not result.get("enabled"):
+            return {"status": "failed", "message": "Weixin proxy is disabled"}
+        return {"status": "success", "result": result}
+    except ProxyCheckError as e:
+        return {"status": "failed", "message": str(e)}
+    except Exception as e:
+        logger.error(f"Weixin proxy test failed: {e}")
+        return {"status": "failed", "message": str(e)}
+
 
 @app.post("/api/weixin/accounts")
 async def weixin_create_account(request: AccountCreate) -> Dict[str, Any]:
@@ -1340,6 +1383,38 @@ async def weixin_delete_task(task_id: int) -> Dict[str, Any]:
         raise
     except Exception as e:
         logger.error(f"删除任务失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/tasks/batch-delete")
+async def weixin_batch_delete_tasks(request: TaskBatchDeleteRequest) -> Dict[str, Any]:
+    """
+    批量删除上传任务。
+
+    处于活动状态（uploading/processing/filling/publishing）的任务会被自动跳过，
+    避免删除正在跑的浏览器任务导致状态错乱。
+    """
+    try:
+        result = weixin_dao.delete_tasks(request.task_ids)
+        deleted = len(result["deleted_ids"])
+        skipped = len(result["skipped_active"])
+        not_found = len(result["not_found"])
+
+        parts = [f"已删除 {deleted} 条"]
+        if skipped:
+            parts.append(f"跳过进行中 {skipped} 条")
+        if not_found:
+            parts.append(f"未找到 {not_found} 条")
+
+        return {
+            "status": "success",
+            "message": "，".join(parts),
+            "deleted_ids": result["deleted_ids"],
+            "skipped_active": result["skipped_active"],
+            "not_found": result["not_found"],
+        }
+    except Exception as e:
+        logger.error(f"批量删除任务失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

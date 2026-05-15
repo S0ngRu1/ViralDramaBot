@@ -19,6 +19,7 @@ from .browser import get_browser_for_account
 from .config import WeixinConfig
 from .dao import WeixinDAO
 from .metadata import MetadataResolver, VideoMetadata
+from .proxy import ProxyCheckError, log_proxy_check_for_upload
 from .schemas import AccountStatus, TaskStatus
 from .account_manager import get_account_lock
 from src.core.logger import logger
@@ -91,6 +92,24 @@ class Uploader:
 
         logger.info(f"开始上传任务 #{task_id}: {video_file.name} → 账号 {account['name']}")
 
+        if WeixinConfig.PROXY_ENABLED:
+            try:
+                proxy_result = log_proxy_check_for_upload()
+                if proxy_result and proxy_result.get("proxy"):
+                    info = proxy_result["proxy"]
+                    location = " ".join(
+                        part
+                        for part in (info.get("country"), info.get("region"), info.get("city"))
+                        if part
+                    )
+                    logger.info(
+                        f"Task #{task_id} proxy location: {info.get('ip') or '-'} {location or '-'}"
+                    )
+            except ProxyCheckError as e:
+                return self._fail_task(task_id, str(e))
+            except Exception as e:
+                return self._fail_task(task_id, f"Proxy location check failed: {e}")
+
         _upload_slot.acquire()
         account_lock = get_account_lock(account_id)
         account_lock.acquire()
@@ -110,7 +129,10 @@ class Uploader:
             self._fill_metadata(page, metadata, drama_link)
 
             # 强制将位置设为「不显示位置」（位置列表第一项），避免 IP 定位泄漏
-            self._set_location_hidden(page)
+            if WeixinConfig.LOCATION_MODE == "hidden":
+                self._set_location_hidden(page)
+            else:
+                logger.info("Weixin location mode is proxy_ip; leaving location for platform IP detection")
             self._random_delay(0.5, 1)
 
             if scheduled_at:

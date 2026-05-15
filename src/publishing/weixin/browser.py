@@ -16,6 +16,14 @@ from .config import WeixinConfig
 from src.core.logger import logger
 
 
+def apply_weixin_proxy(options: ChromiumOptions) -> ChromiumOptions:
+    proxy = WeixinConfig.proxy_url()
+    if proxy:
+        options.set_proxy(proxy)
+        logger.info(f"Weixin browser proxy enabled: {proxy}")
+    return options
+
+
 class BrowserPool:
     """浏览器实例池"""
 
@@ -38,6 +46,7 @@ class BrowserPool:
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--disable-infobars")
         options.set_argument("--no-sandbox")
+        apply_weixin_proxy(options)
         if user_data_dir:
             options.set_user_data_path(user_data_dir)
         page = ChromiumPage(options)
@@ -130,6 +139,7 @@ def _chromium_options_with_profile(user_data_dir: str) -> ChromiumOptions:
     options.set_argument("--no-first-run")
     options.set_argument("--disable-sync")
     options.set_argument("--disable-default-apps")
+    apply_weixin_proxy(options)
     options.set_user_data_path(user_data_dir)
     # 默认未开启时多个 ChromiumPage 可能争用同一调试端口，后起的会顶替前一个窗口。
     options.auto_port(True)
