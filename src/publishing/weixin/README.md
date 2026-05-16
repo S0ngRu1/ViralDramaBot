@@ -7,8 +7,9 @@
 ## 功能概览
 
 - **多账号管理**：最多 50 个视频号账号，扫码登录，Cookie 持久化
-- **单个上传**：选择视频 → 填写信息 → 立即/定时发表
-- **批量上传**：选择多个视频 → 统一标签 → 串行上传
+- **批量上传**：多视频入全局串行队列，批内逐个 `upload_video`
+- **代理 Profile**：多线路管理、出口 IP 检测、上传时按 Profile 走代理
+- **发表位置**：常用地点收藏；支持按代理 IP 反查或手动选点
 - **定时发布**：支持 Cron 表达式或间隔分钟
 - **剧集关联**：支持关联视频号剧集
 - **Cookie 轮询**：每小时检查一次 Cookie 有效性
@@ -20,15 +21,18 @@
 
 ```text
 src/publishing/weixin/
-├── __init__.py                 # 模块导出
-├── config.py                   # 配置管理
-├── schemas.py                  # 数据模型（Pydantic）
-├── dao.py                      # SQLite 数据访问层
-├── account_manager.py          # 账号管理（登录/Cookie）
-├── browser.py                  # 浏览器实例池
-├── uploader.py                 # 视频上传引擎
-├── scheduler.py                # 定时发布调度
-└── metadata.py                 # 元数据解析
+├── __init__.py
+├── config.py                   # 模块配置（浏览器、代理 bypass、冷却时间）
+├── schemas.py                  # Pydantic 请求/响应模型
+├── dao.py                      # SQLite（账号、任务、计划、代理、常用位置）
+├── account_manager.py          # 登录、Cookie、轮询、打开作品列表
+├── browser.py                  # DrissionPage 浏览器池
+├── uploader.py                 # 上传全流程
+├── scheduler.py                # APScheduler 定时计划
+├── metadata.py                 # 标题/描述/标签解析
+├── proxy.py                    # 代理连通性与出口 IP
+├── geocoding.py                # IP 归属地
+└── batch_queue.py              # 多批 upload/batch 的全局串行队列
 ```
 
 ---
@@ -113,8 +117,15 @@ set BROWSER_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 # 最大并发上传数（默认 1，建议保持串行）
 set WEIXIN_MAX_CONCURRENT_UPLOADS="1"
 
-# 连续上传间隔秒数（默认 20）
-set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="20"
+# 连续上传间隔秒数（config.py 环境变量默认 45；全局设置页默认 20，lifespan 会覆盖）
+set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="45"
+
+# 代理（与 src/core/config.py 对齐）
+set WEIXIN_PROXY_ENABLED="true"
+set WEIXIN_PROXY_SCHEME="http"
+set WEIXIN_PROXY_HOST="127.0.0.1"
+set WEIXIN_PROXY_PORT="0"
+set WEIXIN_LOCATION_MODE="proxy_ip"
 ```
 
 ### 配置项（config.py）
@@ -125,11 +136,13 @@ set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="20"
 | `MAX_BROWSER_INSTANCES` | 3 | 最大浏览器实例数 |
 | `BROWSER_HEADLESS` | False | 是否无头模式（扫码需关闭） |
 | `PAGE_LOAD_TIMEOUT` | 30 | 页面加载超时（秒） |
-| `UPLOAD_TIMEOUT` | 600 | 上传超时（秒） |
-| `INTER_UPLOAD_COOLDOWN_SEC` | 20 | 连续上传间隔（秒） |
+| `UPLOAD_TIMEOUT` | 600 | 上传超时（秒，运行时由全局配置覆盖） |
+| `INTER_UPLOAD_COOLDOWN_SEC` | 45 | 批内连续上传间隔（秒） |
 | `MAX_CONCURRENT_UPLOADS` | 1 | 最大并发上传数 |
 | `MAX_RETRIES` | 3 | 最大重试次数 |
 | `MAX_ACCOUNTS` | 50 | 最大账号数 |
+| `UPLOAD_BYPASS_HOSTS` | 见源码 | 上传 CDN 不走代理的域名 |
+| `PROXY_ENABLED` 等 | 见源码 | 与全局 `weixin_proxy_*` 同步 |
 | `SUPPORTED_VIDEO_FORMATS` | mp4, mov, avi, mkv, flv, wmv | 支持的视频格式 |
 | `MAX_VIDEO_SIZE_MB` | 2048 | 最大视频大小（MB） |
 
@@ -171,33 +184,54 @@ set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="20"
 
 ## API 接口
 
+Web 上传入口仅为 **`POST /api/weixin/upload/batch`**（可只传一个视频路径）。单条上传请直接调用 `Uploader.upload_video()` 或 batch 传长度为 1 的 `video_paths`。
+
+### 代理与常用位置
+
+```
+GET    /api/weixin/proxy/test
+GET    /api/weixin/proxy-profiles
+POST   /api/weixin/proxy-profiles
+PUT    /api/weixin/proxy-profiles/{profile_id}
+DELETE /api/weixin/proxy-profiles/{profile_id}
+POST   /api/weixin/proxy-profiles/{profile_id}/check
+POST   /api/weixin/proxy-profiles/check-all
+GET    /api/weixin/favorite-locations
+POST   /api/weixin/favorite-locations
+DELETE /api/weixin/favorite-locations/{location_id}
+```
+
 ### 账号管理
 
 ```
-POST   /api/weixin/accounts              # 创建账号
-GET    /api/weixin/accounts               # 获取所有账号
-GET    /api/weixin/accounts/{id}          # 获取单个账号
-DELETE /api/weixin/accounts/{id}          # 删除账号
-POST   /api/weixin/accounts/{id}/login    # 扫码登录
-POST   /api/weixin/accounts/{id}/refresh  # 刷新登录状态
-POST   /api/weixin/accounts/{id}/open-channels  # 打开视频管理页
+POST   /api/weixin/accounts
+GET    /api/weixin/accounts
+DELETE /api/weixin/accounts/{account_id}
+POST   /api/weixin/accounts/{account_id}/login
+POST   /api/weixin/accounts/{account_id}/refresh
+POST   /api/weixin/accounts/{account_id}/open-post-list
+POST   /api/weixin/accounts/check-cookies
+GET    /api/weixin/accounts/refresh-status
+POST   /api/weixin/accounts/refresh-all
 ```
 
 ### 上传任务
 
 ```
-POST   /api/weixin/upload                 # 创建单个上传任务
-POST   /api/weixin/upload/batch           # 创建批量上传任务
-GET    /api/weixin/tasks                  # 获取任务列表
-DELETE /api/weixin/tasks/{id}             # 删除任务
+POST   /api/weixin/upload/batch           # 创建任务并入全局队列
+GET    /api/weixin/upload/batch/queue     # 队列快照
+GET    /api/weixin/tasks                  # 可选 account_id、status
+DELETE /api/weixin/tasks/{task_id}
+POST   /api/weixin/tasks/batch-delete
+POST   /api/weixin/tasks/{task_id}/retry
 ```
 
 ### 定时计划
 
 ```
-POST   /api/weixin/schedule               # 创建定时计划
-GET    /api/weixin/schedule               # 获取所有计划
-DELETE /api/weixin/schedule/{id}          # 删除计划
+POST   /api/weixin/schedule
+GET    /api/weixin/schedule
+DELETE /api/weixin/schedule/{schedule_id}
 ```
 
 ---
@@ -281,27 +315,16 @@ curl -X POST http://localhost:8000/api/weixin/accounts \
 # 扫码登录
 curl -X POST http://localhost:8000/api/weixin/accounts/1/login
 
-# 上传视频
-curl -X POST http://localhost:8000/api/weixin/upload \
-  -H "Content-Type: application/json" \
-  -d '{
-    "account_id": 1,
-    "video_path": "C:\\videos\\test.mp4",
-    "title": "测试视频",
-    "description": "这是一个测试",
-    "tags": ["测试", "短剧"]
-  }'
-
-# 批量上传
+# 批量上传（单条时 video_paths 长度为 1）
 curl -X POST http://localhost:8000/api/weixin/upload/batch \
   -H "Content-Type: application/json" \
   -d '{
     "account_id": 1,
-    "video_paths": [
-      "C:\\videos\\ep01.mp4",
-      "C:\\videos\\ep02.mp4"
-    ],
-    "tags": ["短剧", "连载"]
+    "video_paths": ["C:\\videos\\test.mp4"],
+    "titles": ["测试视频"],
+    "metadata_source": "manual",
+    "proxy_profile_id": 1,
+    "location_label": "深圳人民公园"
   }'
 ```
 
@@ -313,9 +336,11 @@ curl -X POST http://localhost:8000/api/weixin/upload/batch \
 
 位置：`.data/weixin/weixin.db`
 
-- `accounts` 表：账号信息
-- `upload_tasks` 表：上传任务
-- `schedules` 表：定时计划
+- `accounts` — 账号
+- `upload_tasks` — 上传任务（含 `proxy_profile_id`、`location_label`、`proxy_ip` 等审计字段）
+- `proxy_profiles` — 代理线路
+- `favorite_locations` — 常用发表位置名称
+- `schedules` — 定时计划
 
 ### Cookie 文件
 
@@ -331,11 +356,12 @@ curl -X POST http://localhost:8000/api/weixin/upload/batch \
 
 1. **浏览器要求**：需要安装 Microsoft Edge 浏览器
 2. **扫码登录**：必须在有桌面环境的机器上运行（需要弹出浏览器窗口）
-3. **并发限制**：默认串行上传，避免浏览器实例冲突
-4. **风控策略**：连续上传间隔 20 秒，模拟人类操作延迟
-5. **Cookie 有效期**：后台每小时检查一次，过期需重新扫码
-6. **视频格式**：支持 mp4, mov, avi, mkv, flv, wmv
-7. **视频大小**：最大 2048 MB
+3. **并发限制**：`MAX_CONCURRENT_UPLOADS` 默认 1；多批请求由 `batch_queue` 串行
+4. **风控策略**：批内成功后按 `INTER_UPLOAD_COOLDOWN_SEC` 等待（环境变量默认 45 秒，设置页可改）；模拟人类操作延迟 0.5–2 秒
+5. **代理**：页面请求走代理，视频 CDN（`*.video.qq.com`、`*.wxqcloud.qq.com*` 等）bypass，避免拖慢上传
+6. **Cookie 有效期**：后台每 3600 秒检查，过期需重新扫码
+7. **视频格式**：mp4, mov, avi, mkv, flv, wmv
+8. **视频大小**：最大 2048 MB
 
 ---
 

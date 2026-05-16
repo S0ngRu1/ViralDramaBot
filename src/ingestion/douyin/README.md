@@ -175,9 +175,9 @@ stream=True 发起 GET 请求
 
 当前 Web 层通过以下接口使用本模块：
 
-- `POST /api/videos/parse`
-- `POST /api/videos/download`
-- `GET /api/download-progress`
+- `POST /api/videos/parse` — 解析单条链接
+- `POST /api/videos/download` — 单条或批量下载（`link` / `links` / `tasks[]`，`max_concurrent` 1–10，最多 50 条）
+- `GET /api/download-progress` — 轮询进度（批量时为聚合进度）
 
 调用路径：
 
@@ -270,7 +270,7 @@ print(file_path)
 
 默认值：
 
-- `WORK_DIR = .data`
+- `WORK_DIR`：环境变量未设置时为 `~/.viraldramabot_data`；Web 应用启动后通常使用 `app.py` 的 `DATA_DIR`（开发环境为 `.data`）
 - `DOWNLOAD_TIMEOUT = 1200`
 - `MAX_RETRIES = 3`
 

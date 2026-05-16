@@ -24,6 +24,9 @@
 ViralDramaBot/
 ├── app.py                              # FastAPI 服务入口
 ├── cli.py                              # CLI 命令行入口
+├── run_packaged.py                     # PyInstaller 打包入口
+├── ViralDramaBot.spec
+├── build-exe.bat
 ├── frontend/
 │   ├── index.html                      # 主页面入口
 │   ├── weixin.html                     # 视频号管理页面
@@ -45,11 +48,14 @@ ViralDramaBot/
 │   │       ├── config.py               # 视频号模块配置
 │   │       ├── schemas.py              # Pydantic 数据模型
 │   │       ├── dao.py                  # SQLite 数据访问层
-│   │       ├── account_manager.py      # 账号管理
+│   │       ├── account_manager.py      # 账号管理（含 Cookie 轮询）
 │   │       ├── browser.py              # 浏览器实例池
 │   │       ├── uploader.py             # 视频上传引擎
 │   │       ├── scheduler.py            # 定时发布调度
 │   │       ├── metadata.py             # 元数据解析
+│   │       ├── proxy.py                # 代理检测
+│   │       ├── geocoding.py            # IP 归属地
+│   │       ├── batch_queue.py          # 批量上传队列
 │   │       └── README.md
 │   ├── editing/                         # 编辑层（预留）
 │   ├── workflow/                        # 工作流层（预留）
@@ -101,39 +107,33 @@ src/publishing/weixin/browser.py (DrissionPage)
 app.py
   ├─ src/core/config.py
   ├─ src/core/logger.py
-  ├─ .data/metadata/video_index.db      (抖音视频索引)
-  └─ .data/weixin/weixin.db            (视频号数据)
+  ├─ {DATA_DIR}/metadata/video_index.db   (抖音视频索引)
+  └─ {WORK_DIR}/weixin/weixin.db         (视频号数据)
 ```
 
 ---
 
 ## 模块职责
 
-### `frontend/app.js`
+### `frontend/app.js`（SPA，挂载于 `index.html`）
 
-负责：
+负责四个主页面：
 
-- 下载页交互
-- 视频管理页交互
-- 设置页交互
-- 调用 REST API
-- 轮询下载进度
+- **视频下载**：单条/批量链接、并发下载、进度轮询
+- **视频管理**：索引列表、批量删除、打开文件/文件夹
+- **视频号上传**：账号、批量上传、任务列表、定时计划、发布位置管理（代理 Profile + 常用地点）
+- **应用设置**：保存目录、下载与视频号超时/重试/间隔
 
 主要行为：
 
-- 浏览本地目录
-- 自动识别视频标题
-- 视频名称规范化
+- 浏览本地目录与多选视频文件（`browse-directory` / `browse-files`）
+- 自动识别视频标题、名称规范化
 - 下载完成后刷新视频列表
-- 视频管理页批量选择、删除、打开文件和复制路径
+- 视频号批量上传入队、轮询账号刷新状态与任务列表
 
 ### `frontend/weixin.html`
 
-负责：
-
-- 视频号账号管理页面
-- 上传任务管理页面
-- 定时计划管理页面
+独立精简版视频号页（无「发布位置管理」Tab），功能子集与 SPA 内视频号页类似，侧栏可跳回 `index.html`。
 
 ### `app.py`
 
@@ -148,8 +148,10 @@ app.py
 
 主要接口包括：
 
-**抖音相关：**
-- `POST /api/videos/download`
+**抖音 / 通用：**
+- `GET /` — 重定向至 `/frontend/index.html`
+- `GET /api/status`
+- `POST /api/videos/download` — 支持 `link` / `links` / `tasks[]`，`max_concurrent`（1–10），最多 50 条
 - `POST /api/videos/parse`
 - `GET /api/videos`
 - `GET /api/videos/{video_id}`
@@ -159,25 +161,41 @@ app.py
 - `POST /api/videos/{video_id}/open-folder`
 - `GET /api/download-progress`
 - `GET /api/browse-directory`
+- `GET /api/browse-files`
 - `GET /api/settings`
 - `PUT /api/settings`
-- `GET /api/status`
 
-**视频号相关：**
-- `POST /api/weixin/accounts`
-- `GET /api/weixin/accounts`
-- `GET /api/weixin/accounts/{id}`
-- `DELETE /api/weixin/accounts/{id}`
-- `POST /api/weixin/accounts/{id}/login`
-- `POST /api/weixin/accounts/{id}/refresh`
-- `POST /api/weixin/accounts/{id}/open-channels`
-- `POST /api/weixin/upload`
-- `POST /api/weixin/upload/batch`
-- `GET /api/weixin/tasks`
-- `DELETE /api/weixin/tasks/{id}`
+**视频号 — 代理与位置：**
+- `GET /api/weixin/proxy/test`
+- `GET|POST /api/weixin/proxy-profiles`
+- `PUT|DELETE /api/weixin/proxy-profiles/{profile_id}`
+- `POST /api/weixin/proxy-profiles/{profile_id}/check`
+- `POST /api/weixin/proxy-profiles/check-all`
+- `GET|POST /api/weixin/favorite-locations`
+- `DELETE /api/weixin/favorite-locations/{location_id}`
+
+**视频号 — 账号：**
+- `POST|GET /api/weixin/accounts`
+- `DELETE /api/weixin/accounts/{account_id}`
+- `POST /api/weixin/accounts/{account_id}/login`
+- `POST /api/weixin/accounts/{account_id}/refresh`
+- `POST /api/weixin/accounts/{account_id}/open-post-list`
+- `POST /api/weixin/accounts/check-cookies`
+- `GET /api/weixin/accounts/refresh-status`
+- `POST /api/weixin/accounts/refresh-all`
+
+**视频号 — 上传与任务：**
+- `POST /api/weixin/upload/batch` — 创建任务并入全局串行队列
+- `GET /api/weixin/upload/batch/queue`
+- `GET /api/weixin/tasks` — 可选 `account_id`、`status` 筛选
+- `DELETE /api/weixin/tasks/{task_id}`
+- `POST /api/weixin/tasks/batch-delete`
+- `POST /api/weixin/tasks/{task_id}/retry`
+
+**视频号 — 定时计划：**
 - `POST /api/weixin/schedule`
 - `GET /api/weixin/schedule`
-- `DELETE /api/weixin/schedule/{id}`
+- `DELETE /api/weixin/schedule/{schedule_id}`
 
 ### `src/core/config.py`
 
@@ -190,9 +208,16 @@ app.py
 
 核心配置项：
 
-- `work_dir`
+- `work_dir` / `video_dir`（API 字段名）
 - `download_timeout`
 - `max_retries`
+- `weixin_upload_timeout`
+- `weixin_inter_upload_cooldown`
+- `weixin_max_retries`
+- `weixin_proxy_enabled` / `weixin_proxy_scheme` / `weixin_proxy_host` / `weixin_proxy_port`
+- `weixin_location_mode`（`proxy_ip` | `hidden`）
+
+开发环境 `app.py` 将 `DATA_DIR` 设为项目 `.data`；打包 exe 时为 `%APPDATA%\ViralDramaBot`。视频索引库路径为 `{DATA_DIR}/metadata/video_index.db`。
 
 ### `src/ingestion/douyin/downloader.py`
 
@@ -234,8 +259,10 @@ app.py
 - `MAX_BROWSER_INSTANCES` - 最大浏览器实例数（默认 3）
 - `UPLOAD_TIMEOUT` - 上传超时（默认 600 秒）
 - `MAX_CONCURRENT_UPLOADS` - 最大并发上传数（默认 1）
-- `INTER_UPLOAD_COOLDOWN_SEC` - 连续上传间隔（默认 20 秒）
+- `INTER_UPLOAD_COOLDOWN_SEC` - 连续上传间隔（环境变量默认 45 秒，lifespan 同步全局设置）
 - `MAX_ACCOUNTS` - 最大账号数（默认 50）
+- `UPLOAD_BYPASS_HOSTS` - 上传 CDN 不走代理的域名通配符
+- `PROXY_ENABLED` / `PROXY_SCHEME` / `PROXY_HOST` / `PROXY_PORT` / `LOCATION_MODE`
 
 ### `src/publishing/weixin/schemas.py`
 
@@ -335,6 +362,21 @@ app.py
 - 支持三种来源：手动、文件名、AI
 - 文件名格式解析（下划线分隔、井号标签）
 
+### `src/publishing/weixin/proxy.py`
+
+负责：
+
+- 检测当前或指定 Profile 的代理出口 IP
+- 缓存检测结果；上传前校验
+- 与 `geocoding.py` 配合解析归属地
+
+### `src/publishing/weixin/batch_queue.py`
+
+负责：
+
+- 多个「批量上传」请求的全局 FIFO 串行执行
+- `submit()` 入队、`snapshot()` 供 API 查询队列状态
+
 ---
 
 ## 数据流
@@ -363,18 +405,18 @@ app.py 写入 SQLite 视频索引
 前端轮询 /api/download-progress
 ```
 
-### 视频号上传流程
+### 视频号批量上传流程
 
 ```text
-用户选择视频和账号
+用户选择多个视频和账号（可选代理 Profile、发表位置）
   ↓
-前端调用 /api/weixin/upload
+前端调用 POST /api/weixin/upload/batch
   ↓
-app.py 创建上传任务记录
+app.py 为每个视频 create_task，封装 do_batch_upload
   ↓
-BackgroundTasks 启动上传
+batch_upload_queue.submit() 入全局队列（多批串行）
   ↓
-Uploader.upload_video()
+队列执行：对每个 task 调用 Uploader.upload_video()
   ├─ 验证账号状态
   ├─ 验证视频文件
   ├─ 解析元数据
@@ -426,7 +468,7 @@ app.py 更新 SQLite 索引
 
 ### 视频索引数据库
 
-位置：`.data/metadata/video_index.db`
+位置：`{DATA_DIR}/metadata/video_index.db`（开发环境一般为 `.data/metadata/video_index.db`）
 
 ```sql
 CREATE TABLE videos (
@@ -477,7 +519,36 @@ CREATE TABLE upload_tasks (
     completed_at TEXT,
     error_msg TEXT,
     retry_count INTEGER NOT NULL DEFAULT 0,
+    proxy_ip TEXT,
+    proxy_location TEXT,
+    proxy_profile_id INTEGER,
+    location_label TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
+-- 代理 Profile 表
+CREATE TABLE proxy_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    scheme TEXT NOT NULL DEFAULT 'http',
+    host TEXT NOT NULL DEFAULT '127.0.0.1',
+    port INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_checked_at TEXT,
+    last_ip TEXT,
+    last_country TEXT,
+    last_region TEXT,
+    last_city TEXT,
+    last_isp TEXT,
+    last_check_error TEXT,
+    created_at TEXT NOT NULL
+);
+
+-- 常用发表位置
+CREATE TABLE favorite_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
 );
 
 -- 定时计划表
@@ -507,24 +578,33 @@ CREATE INDEX idx_accounts_status ON accounts(status);
 
 ## 后台任务
 
-应用启动后会启动以下后台任务：
+应用 `lifespan` 启动后会运行：
 
-### 1. 索引修复
+### 1. 索引修复（`periodic_index_repair`）
 
-- 间隔：300 秒
-- 功能：检查视频索引中的文件是否存在，删除失效记录
+- 间隔：`INDEX_REPAIR_INTERVAL_SECONDS = 300`
+- 功能：删除索引中磁盘已不存在的视频记录
 
-### 2. Cookie 轮询
+### 2. Cookie 轮询（`CookieChecker`）
 
-- 间隔：3600 秒（1 小时）
-- 功能：检查所有活跃账号的 Cookie 有效性
-- 失效时自动标记账号为 expired
+- 间隔：3600 秒（`COOKIE_CHECK_INTERVAL_SECONDS`）
+- 功能：检查活跃账号 Cookie，失效则标记 `expired`
 
-### 3. 定时发布调度
+### 3. 定时发布调度（`UploadScheduler`）
 
-- 引擎：APScheduler
-- 支持：Cron 表达式、间隔分钟、单次定时
-- 功能：按计划执行视频上传任务
+- 引擎：APScheduler，时区 `Asia/Shanghai`
+- 支持：Cron 表达式、间隔分钟
+- 功能：按计划创建并执行上传任务
+
+### 4. 批量上传队列（`batch_upload_queue`）
+
+- 全局 FIFO，保证多个 batch 请求不会并行跑浏览器
+- 停止应用时 `batch_upload_queue.stop()`
+
+### 5. 启动时全量账号刷新
+
+- `run_refresh_all_accounts()` 在后台线程执行，不阻塞启动
+- 前端通过 `GET /api/weixin/accounts/refresh-status` 轮询进度
 
 ---
 
