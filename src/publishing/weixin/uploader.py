@@ -600,32 +600,89 @@ class Uploader:
         except Exception as e:
             logger.warning(f"短标题填写失败: {e}")
 
+    def _clear_location_search_input(self, page: ChromiumPage) -> bool:
+        """
+        清空位置面板的搜索输入框，让 Vue 把列表回退到默认（含「不显示位置」）。
+
+        典型用法：`_set_location_by_name` 失败时面板还开着、搜索框里还有用户输入的关键词，
+        此时直接 poll 列表是搜索结果状态，里面**没有**「不显示位置」这一项。
+        必须先把输入框置空，等 Vue 重新渲染默认列表。
+        """
+        try:
+            search_input = page.ele(
+                "css:.post-position-wrap .location-filter-wrap input[placeholder*='搜索']",
+                timeout=1,
+            )
+            if not search_input:
+                search_input = page.ele(
+                    "css:.location-filter-wrap input.weui-desktop-form__input",
+                    timeout=1,
+                )
+            if not search_input:
+                return False
+
+            ok = page.run_js(
+                r"""
+                var el = arguments[0];
+                if (!el) return false;
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                el.focus();
+                setter.call(el, '');
+                // 派发完整事件链：与 _set_location_by_name 的注入对称，确保 Vue 的 v-model
+                // 真正同步成空字符串；少派一个，列表不会刷新。
+                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'Backspace', code: 'Backspace', keyCode: 8, which: 8}));
+                return true;
+                """,
+                search_input,
+            )
+            if ok:
+                logger.info("已清空位置搜索框，等待默认列表恢复...")
+            return bool(ok)
+        except Exception as e:
+            logger.warning(f"清空位置搜索框失败: {e}")
+            return False
+
     def _set_location_hidden(self, page: ChromiumPage):
         """
         将「位置」固定为列表第一项「不显示位置」。
 
         自定义位置一直无法稳定生效（视频号会用 IP 反查覆盖坐标），所以这里直接选择「不显示位置」
         作为默认行为，避免任何位置信息出现在发表后的视频卡片上。
+
+        两种入口状态：
+        - 面板未开：从 `.position-display` 入口点开
+        - 面板已开（前一步 `_set_location_by_name` 失败后留下来的）：搜索框里还有上一次的关键词，
+          列表是搜索结果状态，没有「不显示位置」项。必须先清空搜索框让 Vue 回退到默认列表。
         """
         try:
             logger.info("将位置强制设为：不显示位置")
 
-            position_display = page.ele("css:.post-position-wrap .position-display", timeout=3)
-            if not position_display:
-                position_display = page.ele("css:.position-display", timeout=2)
-            if not position_display:
-                logger.warning("未找到位置区域，跳过设置")
-                return
+            # 检测面板是否已开：直接看 .location-filter-wrap 是否存在
+            filter_wrap = page.ele("css:.location-filter-wrap", timeout=1)
+            if filter_wrap:
+                # 已开：清搜索框，等 Vue 把列表回退到「附近位置 + 不显示位置」
+                self._clear_location_search_input(page)
+                self._random_delay(1.0, 1.5)
+            else:
+                # 未开：从入口打开
+                position_display = page.ele("css:.post-position-wrap .position-display", timeout=3)
+                if not position_display:
+                    position_display = page.ele("css:.position-display", timeout=2)
+                if not position_display:
+                    logger.warning("未找到位置区域，跳过设置")
+                    return
 
-            if not self._scroll_click_element(page, position_display):
-                logger.warning("点击位置区域失败")
-                return
-            self._random_delay(0.5, 1)
+                if not self._scroll_click_element(page, position_display):
+                    logger.warning("点击位置区域失败")
+                    return
+                self._random_delay(0.5, 1)
 
-            filter_wrap = page.ele("css:.location-filter-wrap", timeout=5)
-            if not filter_wrap:
-                logger.warning("未找到位置下拉框，跳过设置")
-                return
+                filter_wrap = page.ele("css:.location-filter-wrap", timeout=5)
+                if not filter_wrap:
+                    logger.warning("未找到位置下拉框，跳过设置")
+                    return
 
             deadline = time.time() + 8.0
             while time.time() < deadline:
@@ -642,14 +699,28 @@ class Uploader:
                     except Exception:
                         continue
                 # 2) 兜底：点列表第一项（视频号的「不显示位置」就是 list[0]）
+                #    注意：必须确认搜索框已清空才走这条 fallback —— 搜索结果列表的 list[0]
+                #    可能是某个真实地点。如果上面没匹配到「不显示位置」，再尝试清一次搜索框
+                #    然后下一轮 poll 再判断。
                 if items:
                     try:
-                        if self._scroll_click_element(page, items[0]):
-                            logger.info("已选择位置列表第一项（按设计即「不显示位置」）")
-                            return
+                        first_text = ""
+                        try:
+                            first_text = (items[0].text or "").strip()
+                        except Exception:
+                            pass
+                        if "不显示位置" in first_text or "不显示" == first_text:
+                            if self._scroll_click_element(page, items[0]):
+                                logger.info("已选择位置列表第一项「不显示位置」")
+                                return
                     except Exception:
                         pass
+                # 如果列表非空但首项不是「不显示位置」，说明搜索框可能还残留文字 → 再清一次
+                if items:
+                    self._clear_location_search_input(page)
                 self._random_delay(0.3, 0.6)
+
+            logger.warning("位置列表内未出现「不显示位置」项，跳过设置（发表时位置保持当前选中）")
 
             logger.warning("位置列表未加载，无法选择「不显示位置」")
 
