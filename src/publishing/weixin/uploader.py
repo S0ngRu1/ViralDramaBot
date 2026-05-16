@@ -19,7 +19,7 @@ from .browser import get_browser_for_account
 from .config import WeixinConfig
 from .dao import WeixinDAO
 from .metadata import MetadataResolver, VideoMetadata
-from .proxy import ProxyCheckError, log_proxy_check_for_upload
+from .proxy import ProxyCheckError, check_profile, log_proxy_check_for_upload, profile_proxy_url
 from .schemas import AccountStatus, TaskStatus
 from .account_manager import get_account_lock
 from src.core.logger import logger
@@ -44,6 +44,8 @@ class Uploader:
         metadata_source: str = "manual",
         scheduled_at: Optional[datetime] = None,
         drama_link: Optional[str] = None,
+        proxy_profile_id: Optional[int] = None,
+        location_label: Optional[str] = None,
     ) -> dict:
         """
         上传单个视频。
@@ -92,7 +94,54 @@ class Uploader:
 
         logger.info(f"开始上传任务 #{task_id}: {video_file.name} → 账号 {account['name']}")
 
-        if WeixinConfig.PROXY_ENABLED:
+        # 代理检测结果：成功 → 用代理 IP 自动识别位置；失败 → 静默降级为「不显示位置」，
+        # 仍然让任务跑下去，避免代理偶发抖动 / 用户没装代理客户端时一刀切阻塞业务。
+        proxy_forced_hidden = False
+        proxy_url = None
+        if proxy_profile_id:
+            profile = self.dao.get_proxy_profile(proxy_profile_id)
+            if not profile:
+                proxy_forced_hidden = True
+                logger.warning(f"任务 #{task_id} 指定的代理 Profile 不存在：{proxy_profile_id}")
+            elif not profile.get("enabled"):
+                proxy_forced_hidden = True
+                logger.warning(f"任务 #{task_id} 指定的代理 Profile 已停用：{profile.get('name')}")
+            else:
+                proxy_url = profile_proxy_url(profile)
+                # 走带 TTL 缓存的检测：同一批连续上传任务不会反复打 ip-api.com，
+                # 也能避免本地代理端口被高频 CONNECT 打到 500 / 超时（爱加速等本地代理对短时多连接敏感）。
+                try:
+                    proxy_result = log_proxy_check_for_upload(proxy_url=proxy_url)
+                    info = (proxy_result or {}).get("proxy") or {}
+                    if not info.get("ip"):
+                        raise RuntimeError("代理检测未返回 IP")
+                    location = " ".join(
+                        part
+                        for part in (info.get("country"), info.get("region"), info.get("city"))
+                        if part
+                    )
+                    self.dao.update_proxy_profile_check_result(
+                        proxy_profile_id,
+                        info.get("ip") or None,
+                        info.get("country") or None,
+                        info.get("region") or None,
+                        info.get("city") or None,
+                        info.get("isp") or None,
+                        None,
+                    )
+                    self.dao.update_task_proxy(task_id, info.get("ip") or None, location or None)
+                    logger.info(
+                        f"任务 #{task_id} 使用代理 Profile「{profile.get('name')}」：IP={info.get('ip') or '-'} 位置={location or '-'}"
+                    )
+                except Exception as e:
+                    proxy_forced_hidden = True
+                    self.dao.update_proxy_profile_check_result(
+                        proxy_profile_id, None, None, None, None, None, str(e)
+                    )
+                    logger.warning(
+                        f"任务 #{task_id} 代理 Profile 检测失败：{e}，降级为「不显示位置」继续上传"
+                    )
+        elif WeixinConfig.PROXY_ENABLED:
             try:
                 proxy_result = log_proxy_check_for_upload()
                 if proxy_result and proxy_result.get("proxy"):
@@ -103,19 +152,46 @@ class Uploader:
                         if part
                     )
                     logger.info(
-                        f"Task #{task_id} proxy location: {info.get('ip') or '-'} {location or '-'}"
+                        f"任务 #{task_id} 代理出口：IP={info.get('ip') or '-'} 位置={location or '-'}"
+                    )
+                    # 把代理 IP 和位置持久化到任务表，便于事后审计「这条视频走的哪个出口」
+                    try:
+                        self.dao.update_task_proxy(
+                            task_id,
+                            info.get("ip") or None,
+                            location or None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"写入任务 #{task_id} 代理审计字段失败：{e}")
+                else:
+                    # PROXY_ENABLED 但代理 URL 没配 / 检测函数返回 None：保守降级到 hidden
+                    proxy_forced_hidden = True
+                    logger.warning(
+                        f"任务 #{task_id} 代理已启用但不可用（配置缺失），降级为「不显示位置」继续上传"
                     )
             except ProxyCheckError as e:
-                return self._fail_task(task_id, str(e))
+                proxy_forced_hidden = True
+                logger.warning(
+                    f"任务 #{task_id} 代理检测未通过：{e} —— 自动降级为「不显示位置」继续上传"
+                )
             except Exception as e:
-                return self._fail_task(task_id, f"Proxy location check failed: {e}")
+                proxy_forced_hidden = True
+                logger.warning(
+                    f"任务 #{task_id} 代理检测异常：{e} —— 自动降级为「不显示位置」继续上传"
+                )
 
         _upload_slot.acquire()
         account_lock = get_account_lock(account_id)
         account_lock.acquire()
         page = None
         try:
-            page = get_browser_for_account(account["cookie_path"])
+            # 上传 CDN（*.video.qq.com 等）跳过代理直连，避免代理拖慢/超时；
+            # SPA 接口（channels.weixin.qq.com）仍走代理，位置反查行为不变。
+            page = get_browser_for_account(
+                account["cookie_path"],
+                proxy_url=proxy_url,
+                bypass_hosts=WeixinConfig.UPLOAD_BYPASS_HOSTS if proxy_url else None,
+            )
             self._load_cookies(page, account["cookie_path"])
 
             self.dao.update_task_status(task_id, TaskStatus.UPLOADING)
@@ -128,11 +204,21 @@ class Uploader:
             self.dao.update_task_status(task_id, TaskStatus.FILLING)
             self._fill_metadata(page, metadata, drama_link)
 
-            # 强制将位置设为「不显示位置」（位置列表第一项），避免 IP 定位泄漏
-            if WeixinConfig.LOCATION_MODE == "hidden":
-                self._set_location_hidden(page)
+            # 位置策略（新规则，简化为两条）：
+            #   1) 用户在批量上传里填了「发表位置」 → 在视频号位置面板按该关键词搜索并选中；
+            #      搜不到 / 代理强制 hidden 时降级为「不显示位置」
+            #   2) 没填位置 → 一律走「不显示位置」，不再依赖 LOCATION_MODE 的 proxy_ip 默认
+            #      这样代理 IP 反查可能不准导致位置混乱的情况被彻底规避
+            if location_label and not proxy_forced_hidden:
+                if not self._set_location_by_name(page, location_label):
+                    logger.warning(f"未能选择位置「{location_label}」，降级为「不显示位置」")
+                    self._set_location_hidden(page)
             else:
-                logger.info("Weixin location mode is proxy_ip; leaving location for platform IP detection")
+                if proxy_forced_hidden and location_label:
+                    logger.info(f"代理不可用，忽略指定位置「{location_label}」，发表时选择「不显示位置」")
+                elif not location_label:
+                    logger.info("未指定位置，发表时选择「不显示位置」")
+                self._set_location_hidden(page)
             self._random_delay(0.5, 1)
 
             if scheduled_at:
@@ -565,6 +651,116 @@ class Uploader:
 
         except Exception as e:
             logger.warning(f"设置「不显示位置」失败: {e}")
+
+    def _set_location_by_name(self, page: ChromiumPage, location_label: str) -> bool:
+        """
+        按名称搜索并选中视频号位置。
+
+        视频号位置面板的实际 DOM（参考 tmp/视频号创建视频.html）：
+
+            .post-position-wrap
+              .location-filter-wrap
+                .search-input
+                  ... <input type="text" placeholder="搜索附近位置" class="weui-desktop-form__input">
+                .location-item × N   <!-- 默认渲染的是"附近位置"列表 -->
+
+        要点：
+        1) 点开位置入口后，搜索 input 不是立刻就在 DOM 里 —— Vue 异步渲染面板，需要 poll
+        2) input value 需要走 native setter，并补全 `input/change/keyup` 事件，少派一个
+           Vue 的 v-model 跟踪不到，会出现"看着填了字但搜索请求没发出去"
+        3) 输入后等 1.5s 让搜索结果加载，再在 `.location-item` 列表里挑包含关键词的项点击
+        """
+        label = (location_label or "").strip()
+        if not label:
+            return False
+        try:
+            logger.info(f"尝试按名称选择位置：{label}")
+            position_display = page.ele("css:.post-position-wrap .position-display", timeout=3)
+            if not position_display:
+                position_display = page.ele("css:.position-display", timeout=2)
+            if not position_display or not self._scroll_click_element(page, position_display):
+                return False
+            self._random_delay(0.5, 1)
+
+            # 1) Poll 等位置面板的搜索 input 出现（最多 5s）
+            search_input = None
+            input_deadline = time.time() + 5.0
+            while time.time() < input_deadline:
+                search_input = page.ele(
+                    "css:.post-position-wrap .location-filter-wrap input[placeholder*='搜索']",
+                    timeout=0.5,
+                )
+                if not search_input:
+                    search_input = page.ele(
+                        "css:.location-filter-wrap input.weui-desktop-form__input",
+                        timeout=0.5,
+                    )
+                if search_input:
+                    break
+                self._random_delay(0.2, 0.4)
+
+            if not search_input:
+                logger.warning("位置面板的搜索框未出现，无法按名称搜索")
+                return False
+
+            # 2) 注入文本 + 派发完整事件链
+            inject_ok = page.run_js(
+                r"""
+                var el = arguments[0];
+                var keyword = String(arguments[1] == null ? '' : arguments[1]);
+                if (!el) return false;
+                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                el.focus();
+                setter.call(el, '');
+                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
+                setter.call(el, keyword);
+                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: keyword}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+                el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13}));
+                var btn = document.querySelector('.location-filter-wrap .weui-desktop-search__btn');
+                if (btn) btn.click();
+                return true;
+                """,
+                search_input,
+                label,
+            )
+            if not inject_ok:
+                logger.warning("位置搜索框无法注入文本")
+                return False
+
+            logger.info(f"已在位置搜索框输入：{label}，等待结果...")
+            self._random_delay(1.2, 1.8)
+
+            # 3) 在结果列表里挑匹配项：优先包含关键词，找不到再回退首项
+            deadline = time.time() + 8.0
+            while time.time() < deadline:
+                items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
+                fallback = None
+                for item in items:
+                    try:
+                        text = (item.text or "").strip()
+                        if not text or "不显示位置" in text:
+                            continue
+                        if not fallback:
+                            fallback = item
+                        if label in text:
+                            if self._scroll_click_element(page, item):
+                                logger.info(f"已选择位置：{text}")
+                                return True
+                    except Exception:
+                        continue
+                if fallback and self._scroll_click_element(page, fallback):
+                    fb_text = ""
+                    try:
+                        fb_text = (fallback.text or "").strip()
+                    except Exception:
+                        pass
+                    logger.info(f"已选择位置搜索首项：{fb_text or label}")
+                    return True
+                self._random_delay(0.3, 0.6)
+        except Exception as e:
+            logger.warning(f"按名称设置位置失败：{e}")
+        return False
 
     def _scroll_click_element(self, page: ChromiumPage, ele) -> bool:
         """滚动到视口内再点击；对文本节点会沿父链多点几次。"""

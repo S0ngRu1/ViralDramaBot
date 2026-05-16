@@ -182,6 +182,87 @@ const api = {
         }
     },
 
+    getWeixinProxyProfiles: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/proxy-profiles`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinProxyProfile: async (payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/proxy-profiles`, payload);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    updateWeixinProxyProfile: async (id, payload) => {
+        try {
+            const response = await axios.put(`${API_BASE_URL}/weixin/proxy-profiles/${id}`, payload);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinProxyProfile: async (id) => {
+        try {
+            const response = await axios.delete(`${API_BASE_URL}/weixin/proxy-profiles/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    checkWeixinProxyProfile: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/proxy-profiles/${id}/check`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    checkAllWeixinProxyProfiles: async () => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/proxy-profiles/check-all`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    listWeixinFavoriteLocations: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/favorite-locations`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    createWeixinFavoriteLocation: async (name) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/favorite-locations`, { name });
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinFavoriteLocation: async (id) => {
+        try {
+            const response = await axios.delete(`${API_BASE_URL}/weixin/favorite-locations/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     /**
      * 获取应用状态
      */
@@ -246,6 +327,24 @@ const api = {
     deleteWeixinAccount: async (id) => {
         try {
             const response = await axios.delete(`${API_BASE_URL}/weixin/accounts/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    getWeixinAccountsRefreshStatus: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/accounts/refresh-status`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    refreshAllWeixinAccounts: async () => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/refresh-all`);
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -423,7 +522,7 @@ const app = createApp({
             weixin_upload_timeout: 600,
             weixin_inter_upload_cooldown: 20,
             weixin_max_retries: 3,
-            weixin_proxy_enabled: false,
+            weixin_proxy_enabled: true,
             weixin_proxy_scheme: 'http',
             weixin_proxy_host: '127.0.0.1',
             weixin_proxy_port: 0,
@@ -1276,21 +1375,28 @@ app.component('settings-page', {
                         视频号上传失败时的重试次数
                     </p>
                 </div>
+            </div>
+
+            <!-- 视频号上传代理（独立卡片） — 已迁移到「视频号上传管理 → 发布位置管理」tab；
+                 此卡片仅作为兼容保留，UI 隐藏，formData 字段保留避免 PUT settings 形状变化 -->
+            <div v-if="false" class="card">
+                <div class="card-title">📡 视频号上传代理</div>
 
                 <div class="form-group">
                     <label>
                         <input type="checkbox" v-model="formData.weixin_proxy_enabled" />
-                        Weixin upload proxy
+                        启用上传代理
                     </label>
                     <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
-                        Use Aijiasu manual HTTP/Socks5 local proxy for login and upload browser traffic.
+                        开启后，登录扫码、Cookie 校验、视频上传等所有浏览器流量都会走下方代理。
+                        仅支持本地无鉴权代理（如爱加速"手动代理 HTTP/Socks5"模式提供的本地端口）。
                     </p>
                 </div>
 
                 <div class="row">
                     <div class="col">
                         <div class="form-group">
-                            <label>Proxy scheme</label>
+                            <label>协议</label>
                             <select v-model="formData.weixin_proxy_scheme">
                                 <option value="http">HTTP</option>
                                 <option value="socks5">Socks5</option>
@@ -1299,39 +1405,41 @@ app.component('settings-page', {
                     </div>
                     <div class="col">
                         <div class="form-group">
-                            <label>Proxy host</label>
+                            <label>主机</label>
                             <input v-model.trim="formData.weixin_proxy_host" placeholder="127.0.0.1" />
                         </div>
                     </div>
                     <div class="col">
                         <div class="form-group">
-                            <label>Proxy port</label>
-                            <input v-model.number="formData.weixin_proxy_port" type="number" min="0" max="65535" />
+                            <label>端口</label>
+                            <input v-model.number="formData.weixin_proxy_port" type="number" min="0" max="65535" placeholder="例如 30001" />
                         </div>
                     </div>
                 </div>
 
                 <div class="form-group">
-                    <label>Location mode</label>
+                    <label>位置策略</label>
                     <select v-model="formData.weixin_location_mode">
-                        <option value="proxy_ip">Show by proxy IP</option>
-                        <option value="hidden">Hide location</option>
+                        <option value="proxy_ip">按代理出口 IP 自动识别位置</option>
+                        <option value="hidden">不显示位置（始终选「不显示位置」）</option>
                     </select>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        选择「按代理 IP 自动识别」时，视频号会根据代理出口 IP 显示对应地区；
+                        选择「不显示位置」时，发表时会强制选中位置列表第一项。
+                    </p>
                 </div>
 
-                <button class="btn btn-secondary" @click="testProxy" :disabled="isTestingProxy">
-                    {{ isTestingProxy ? 'Testing...' : 'Test proxy location' }}
-                </button>
-                <p v-if="proxyTestResult" class="text-muted" style="font-size: 12px; margin-top: 8px;">
-                    {{ proxyTestResult }}
-                </p>
-
-                <button
-                    class="btn btn-primary btn-block"
-                    @click="save"
-                >
-                    💾 保存设置
-                </button>
+                <div class="form-group">
+                    <button class="btn btn-secondary" @click="testProxy" :disabled="isTestingProxy">
+                        {{ isTestingProxy ? '检测中...' : '🔍 测试代理位置' }}
+                    </button>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 5px;">
+                        会先保存当前设置，再实测代理出口 IP / 归属地（绕过缓存）。
+                    </p>
+                    <p v-if="proxyTestResult" :class="['text-muted', proxyTestOk ? 'text-success' : 'text-danger']" style="font-size: 12px; margin-top: 8px; white-space: pre-line;">
+                        {{ proxyTestResult }}
+                    </p>
+                </div>
             </div>
 
             <!-- 系统信息 -->
@@ -1352,6 +1460,11 @@ app.component('settings-page', {
                     </div>
                 </div>
             </div>
+
+            <!-- 保存按钮：作用于以上全部卡片的设置 -->
+            <button class="btn btn-primary btn-block" @click="save">
+                💾 保存设置
+            </button>
         </div>
     `,
 
@@ -1372,6 +1485,7 @@ app.component('settings-page', {
         const isBrowsing = ref(false);
         const isTestingProxy = ref(false);
         const proxyTestResult = ref('');
+        const proxyTestOk = ref(false);
 
         const browseVideoDir = async () => {
             if (isBrowsing.value) return;
@@ -1401,19 +1515,34 @@ app.component('settings-page', {
         const testProxy = async () => {
             if (isTestingProxy.value) return;
             proxyTestResult.value = '';
+            proxyTestOk.value = false;
             isTestingProxy.value = true;
             try {
+                // 先把当前表单里的代理配置保存到后端，再测 —— 避免「我刚改了端口但还没点保存」的混淆。
                 await props.api.updateSettings(formData);
                 const result = await props.api.testWeixinProxy();
                 if (result.status === 'success') {
-                    const proxy = result.result?.proxy || {};
+                    const r = result.result || {};
+                    const proxy = r.proxy || {};
                     const location = [proxy.country, proxy.region, proxy.city].filter(Boolean).join(' ');
-                    proxyTestResult.value = `OK: ${proxy.ip || '-'} ${location || ''}`;
+                    const lines = [
+                        `✅ 代理生效：${proxy.ip || '-'}  ${location || '位置未知'}`,
+                        `   归属：${proxy.isp || '-'}（检测源：${proxy.provider || '-'}）`,
+                    ];
+                    if (r.direct_failed) {
+                        lines.push('⚠️ 直连 IP 无法获取，未能独立验证代理出口（若整机走 VPN，请忽略）');
+                    } else if (r.direct?.ip) {
+                        lines.push(`   对比直连 IP：${r.direct.ip}（不同，代理已生效）`);
+                    }
+                    proxyTestResult.value = lines.join('\n');
+                    proxyTestOk.value = true;
                 } else {
-                    proxyTestResult.value = `Failed: ${result.message || 'proxy unavailable'}`;
+                    proxyTestResult.value = `❌ 测试失败：${result.message || '代理不可用'}`;
+                    proxyTestOk.value = false;
                 }
             } catch (error) {
-                proxyTestResult.value = 'Failed: ' + (error.detail || error.message || error);
+                proxyTestResult.value = '❌ 测试失败：' + (error.detail || error.message || error);
+                proxyTestOk.value = false;
             } finally {
                 isTestingProxy.value = false;
             }
@@ -1424,6 +1553,7 @@ app.component('settings-page', {
             isBrowsing,
             isTestingProxy,
             proxyTestResult,
+            proxyTestOk,
             browseVideoDir,
             save,
             testProxy
@@ -1441,7 +1571,7 @@ app.component('weixin-page', {
         <div>
             <div class="header">
                 <h1>📤 视频号上传管理</h1>
-                <p>管理视频号账号、上传视频、设置定时发布</p>
+                <p>管理视频号账号、批量上传视频、配置发布位置</p>
             </div>
 
             <!-- 消息提示 -->
@@ -1454,22 +1584,48 @@ app.component('weixin-page', {
                 <div :class="['tab', { active: tab === 'accounts' }]" @click="tab = 'accounts'">账号管理</div>
                 <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
                 <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
-                <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
+                <div :class="['tab', { active: tab === 'proxies' }]" @click="tab = 'proxies'; loadProxyProfiles(); loadFavoriteLocations()">发布位置管理</div>
+                <!-- 定时发布暂不对外暴露，保留后端代码以便后续恢复 -->
+                <div v-if="false" :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'; loadSchedules()">定时发布</div>
             </div>
 
             <!-- 账号管理 -->
             <div v-if="tab === 'accounts'">
+                <div
+                    v-if="refreshAllState.is_refreshing"
+                    class="card"
+                    style="border-left: 4px solid #1890ff; background: #f0f9ff;"
+                >
+                    <div class="flex-between">
+                        <strong>🔄 正在批量刷新账号状态…</strong>
+                        <span class="spinner"></span>
+                    </div>
+                </div>
                 <div class="card">
                     <div class="flex-between" style="margin-bottom: 16px;">
                         <div class="card-title" style="margin-bottom: 0;">视频号账号</div>
-                        <button class="btn btn-primary btn-small" @click="showAddAccount = true">+ 添加账号</button>
+                        <div class="action-group">
+                            <button
+                                class="btn btn-secondary btn-small"
+                                @click="triggerRefreshAll"
+                                :disabled="refreshAllState.is_refreshing"
+                                title="重新检测所有账号 Cookie 是否仍有效"
+                            >
+                                <span v-if="refreshAllState.is_refreshing"><span class="spinner"></span> 刷新中</span>
+                                <span v-else>🔄 全量刷新</span>
+                            </button>
+                            <button
+                                class="btn btn-primary btn-small"
+                                @click="showAddAccount = true"
+                                :disabled="refreshAllState.is_refreshing"
+                            >+ 添加账号</button>
+                        </div>
                     </div>
                     <table class="table" v-if="accounts.length">
                         <thead>
                             <tr>
                                 <th>ID</th>
                                 <th>名称</th>
-                                <th>微信ID</th>
                                 <th>状态</th>
                                 <th>备注</th>
                                 <th>创建时间</th>
@@ -1480,7 +1636,6 @@ app.component('weixin-page', {
                             <tr v-for="acc in accounts" :key="acc.id">
                                 <td>{{ acc.id }}</td>
                                 <td>{{ acc.name }}</td>
-                                <td>{{ acc.wechat_id || '-' }}</td>
                                 <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
                                 <td>
                                     <span v-if="acc.status === 'expired' || acc.status === 'error'" style="color: #ff4d4f; font-size: 13px;">需重新登录</span>
@@ -1489,17 +1644,17 @@ app.component('weixin-page', {
                                 <td>{{ formatDate(acc.created_at) }}</td>
                                 <td>
                                     <div class="action-group">
-                                        <button class="btn btn-primary btn-small" @click="loginAccount(acc.id)" :disabled="acc.status === 'logging_in'">
+                                        <button class="btn btn-primary btn-small" @click="loginAccount(acc.id)" :disabled="acc.status === 'logging_in' || refreshAllState.is_refreshing">
                                             {{ acc.status === 'logging_in' ? '扫码中...' : '扫码登录' }}
                                         </button>
-                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)" :disabled="refreshingIds.has(acc.id)">
+                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)" :disabled="refreshingIds.has(acc.id) || refreshAllState.is_refreshing">
                                             <span v-if="refreshingIds.has(acc.id)"><span class="spinner"></span> 刷新中</span>
                                             <span v-else>刷新</span>
                                         </button>
-                                        <button class="btn btn-secondary btn-small" @click="openWeixinPostList(acc.id)" title="使用与自动上传相同的 Chromium 打开视频列表（请勿在上传中重复点击）">
+                                        <button class="btn btn-secondary btn-small" @click="openWeixinPostList(acc.id)" :disabled="refreshAllState.is_refreshing">
                                             视频管理页
                                         </button>
-                                        <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)">删除</button>
+                                        <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)" :disabled="refreshAllState.is_refreshing">删除</button>
                                     </div>
                                 </td>
                             </tr>
@@ -1558,6 +1713,100 @@ app.component('weixin-page', {
                         <label>剧集链接（可选）</label>
                         <input v-model="batchForm.drama_link" type="text" placeholder="输入视频号剧集名称">
                     </div>
+                    <div class="row">
+                        <div class="col">
+                            <div class="form-group">
+                                <label>上传代理</label>
+                                <!-- 与「发表位置」同款 combobox 风格的下拉。代理只能从已配置的 enabled
+                                     profile 里选，不允许自定义输入，所以展示框做成只读外观（光标 pointer）。 -->
+                                <div ref="proxyComboboxRef" style="position: relative;">
+                                    <div
+                                        @click="showProxyDropdown = !showProxyDropdown"
+                                        :title="selectedProxyDisplay"
+                                        style="border: 1px solid #d9d9d9; border-radius: 4px;
+                                               padding: 8px 36px 8px 12px; cursor: pointer;
+                                               background: #fff; font-size: 14px; line-height: 1.5;
+                                               min-height: 38px; white-space: nowrap; overflow: hidden;
+                                               text-overflow: ellipsis; user-select: none;"
+                                    >{{ selectedProxyDisplay }}</div>
+                                    <button
+                                        type="button"
+                                        @click.stop="showProxyDropdown = !showProxyDropdown"
+                                        :title="showProxyDropdown ? '收起' : '展开代理列表'"
+                                        style="position: absolute; right: 1px; top: 1px; bottom: 1px; width: 32px;
+                                               background: transparent; border: none; cursor: pointer;
+                                               color: #888; font-size: 12px;"
+                                    >{{ showProxyDropdown ? '▲' : '▼' }}</button>
+                                    <div
+                                        v-if="showProxyDropdown"
+                                        style="position: absolute; top: calc(100% + 2px); left: 0; right: 0;
+                                               background: #fff; border: 1px solid #ddd; border-radius: 4px;
+                                               box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-height: 220px;
+                                               overflow-y: auto; z-index: 50;"
+                                    >
+                                        <div
+                                            @mousedown.prevent="selectProxyProfile('')"
+                                            style="padding: 8px 12px; cursor: pointer; font-size: 14px; color: #999;"
+                                            onmouseover="this.style.background='#f5f5f5'"
+                                            onmouseout="this.style.background='#fff'"
+                                        >不指定代理 Profile</div>
+                                        <div
+                                            v-for="p in enabledProxyProfiles"
+                                            :key="p.id"
+                                            @mousedown.prevent="selectProxyProfile(p.id)"
+                                            style="padding: 8px 12px; cursor: pointer; font-size: 14px;"
+                                            onmouseover="this.style.background='#f5f5f5'"
+                                            onmouseout="this.style.background='#fff'"
+                                        >{{ proxyProfileOptionLabel(p) }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-group">
+                                <label>发表位置</label>
+                                <!-- 自定义 combobox：原生 <datalist> 在 Chromium 上没有可见的下拉箭头，
+                                     UX 不够明显。这里在 input 右侧放一个明确的 ▼ 按钮，点击后展示候选浮层；
+                                     输入文字会自动过滤候选；点候选项填入 input 并关闭浮层。 -->
+                                <div ref="locationComboboxRef" style="position: relative;">
+                                    <input
+                                        v-model.trim="batchForm.location_label"
+                                        type="text"
+                                        placeholder="可下拉选择常用位置或手输；留空则按「不显示位置」发表"
+                                        style="padding-right: 36px;"
+                                        @focus="showLocationDropdown = true"
+                                    />
+                                    <button
+                                        type="button"
+                                        @click="showLocationDropdown = !showLocationDropdown"
+                                        :title="showLocationDropdown ? '收起' : '展开常用位置'"
+                                        style="position: absolute; right: 1px; top: 1px; bottom: 1px; width: 32px;
+                                               background: transparent; border: none; cursor: pointer;
+                                               color: #888; font-size: 12px;"
+                                    >{{ showLocationDropdown ? '▲' : '▼' }}</button>
+                                    <div
+                                        v-if="showLocationDropdown && filteredFavoriteLocations.length"
+                                        style="position: absolute; top: calc(100% + 2px); left: 0; right: 0;
+                                               background: #fff; border: 1px solid #ddd; border-radius: 4px;
+                                               box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-height: 220px;
+                                               overflow-y: auto; z-index: 50;"
+                                    >
+                                        <div
+                                            v-for="loc in filteredFavoriteLocations"
+                                            :key="loc.id"
+                                            @mousedown.prevent="selectFavoriteLocation(loc.name)"
+                                            style="padding: 8px 12px; cursor: pointer; font-size: 14px;"
+                                            onmouseover="this.style.background='#f5f5f5'"
+                                            onmouseout="this.style.background='#fff'"
+                                        >{{ loc.name }}</div>
+                                    </div>
+                                </div>
+                                <p v-if="!favoriteLocations.length" class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                                    可在「发布位置管理」页设置常用位置，之后这里会出现下拉候选
+                                </p>
+                            </div>
+                        </div>
+                    </div>
                     <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!batchForm.account_id || batchForm.videoFiles.length === 0">
                         批量上传
                     </button>
@@ -1581,55 +1830,147 @@ app.component('weixin-page', {
                             <button class="btn btn-secondary btn-small" @click="loadTasks()">刷新</button>
                         </div>
                     </div>
-                    <table class="table" v-if="tasks.length">
+                    <!-- 整表横向滚动：视频名/描述/位置内容可能很长，让它们保持原宽并允许左右滑动 -->
+                    <div v-if="tasks.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch;">
+                        <table class="table" style="min-width: 1180px;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 36px;">
+                                        <input
+                                            type="checkbox"
+                                            :checked="isAllSelectableSelected"
+                                            :indeterminate.prop="isPartiallySelected"
+                                            :disabled="!selectableTaskIds.length"
+                                            @change="toggleSelectAllTasks($event.target.checked)"
+                                            title="全选当前列表中可删除的任务"
+                                        />
+                                    </th>
+                                    <th style="width: 56px;">序号</th>
+                                    <th style="width: 110px;">账号</th>
+                                    <th style="min-width: 220px;">视频</th>
+                                    <th style="min-width: 240px;">描述</th>
+                                    <th style="min-width: 140px;">位置</th>
+                                    <th style="width: 92px;">状态</th>
+                                    <th style="width: 160px;">创建时间</th>
+                                    <th style="width: 140px;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(task, idx) in tasks" :key="task.id">
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            :value="task.id"
+                                            v-model="selectedTaskIds"
+                                            :disabled="isTaskActive(task.status)"
+                                            :title="isTaskActive(task.status) ? '正在执行中，无法删除' : ''"
+                                        />
+                                    </td>
+                                    <td :title="'内部 ID #' + task.id">{{ idx + 1 }}</td>
+                                    <td>{{ getAccountName(task.account_id) }}</td>
+                                    <td :title="task.video_path">{{ getFileName(task.video_path) }}</td>
+                                    <td :title="task.description || task.title || '-'">{{ task.description || task.title || '-' }}</td>
+                                    <td :title="task.location_label || '-'">{{ task.location_label || '-' }}</td>
+                                    <td><span :class="'badge badge-' + getTaskStatusClass(task.status)">{{ getTaskStatusText(task.status) }}</span></td>
+                                    <td>{{ formatDate(task.created_at) }}</td>
+                                    <td>
+                                        <div class="action-group">
+                                            <button v-if="task.status === 'failed'" class="btn btn-primary btn-small" @click="retryTask(task.id)">重试</button>
+                                            <button class="btn btn-danger btn-small" @click="deleteTask(task.id)">删除</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div v-else class="empty-state">暂无上传任务</div>
+                </div>
+            </div>
+
+            <div v-if="tab === 'proxies'">
+                <div class="card">
+                    <div class="flex-between" style="margin-bottom: 16px;">
+                        <div class="card-title" style="margin-bottom: 0;">发布位置管理</div>
+                        <div class="action-group">
+                            <button class="btn btn-secondary btn-small" @click="checkAllProxyProfiles" :disabled="checkingAllProxies">批量检测</button>
+                            <button class="btn btn-primary btn-small" @click="openProxyModal()">+ 添加代理</button>
+                        </div>
+                    </div>
+                    <table class="table" v-if="proxyProfiles.length">
                         <thead>
                             <tr>
-                                <th style="width: 36px;">
-                                    <input
-                                        type="checkbox"
-                                        :checked="isAllSelectableSelected"
-                                        :indeterminate.prop="isPartiallySelected"
-                                        :disabled="!selectableTaskIds.length"
-                                        @change="toggleSelectAllTasks($event.target.checked)"
-                                        title="全选当前列表中可删除的任务"
-                                    />
-                                </th>
                                 <th>ID</th>
-                                <th>账号</th>
-                                <th>视频</th>
-                                <th>描述</th>
+                                <th>名称</th>
+                                <th>协议</th>
+                                <th>地址</th>
                                 <th>状态</th>
-                                <th>创建时间</th>
+                                <th>出口 IP</th>
+                                <th>位置</th>
+                                <th>运营商</th>
+                                <th>最近检测</th>
                                 <th>操作</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <tr v-for="task in tasks" :key="task.id">
-                                <td>
-                                    <input
-                                        type="checkbox"
-                                        :value="task.id"
-                                        v-model="selectedTaskIds"
-                                        :disabled="isTaskActive(task.status)"
-                                        :title="isTaskActive(task.status) ? '正在执行中，无法删除' : ''"
-                                    />
-                                </td>
-                                <td>{{ task.id }}</td>
-                                <td>{{ getAccountName(task.account_id) }}</td>
-                                <td>{{ getFileName(task.video_path) }}</td>
-                                <td class="truncate" :title="task.description || task.title || '-'">{{ task.description || task.title || '-' }}</td>
-                                <td><span :class="'badge badge-' + getTaskStatusClass(task.status)">{{ getTaskStatusText(task.status) }}</span></td>
-                                <td>{{ formatDate(task.created_at) }}</td>
+                            <tr v-for="p in proxyProfiles" :key="p.id">
+                                <td>{{ p.id }}</td>
+                                <td>{{ p.name }}</td>
+                                <td>{{ String(p.scheme || '').toUpperCase() }}</td>
+                                <td>{{ p.host }}:{{ p.port }}</td>
+                                <td><span :class="['badge', p.enabled ? 'badge-success' : 'badge-default']">{{ p.enabled ? '启用' : '停用' }}</span></td>
+                                <td>{{ p.last_ip || '-' }}</td>
+                                <td>{{ [p.last_country, p.last_region, p.last_city].filter(Boolean).join(' ') || '-' }}</td>
+                                <td class="truncate" :title="p.last_check_error || p.last_isp || '-'">{{ p.last_check_error || p.last_isp || '-' }}</td>
+                                <td>{{ formatDate(p.last_checked_at) }}</td>
                                 <td>
                                     <div class="action-group">
-                                        <button v-if="task.status === 'failed'" class="btn btn-primary btn-small" @click="retryTask(task.id)">重试</button>
-                                        <button class="btn btn-danger btn-small" @click="deleteTask(task.id)">删除</button>
+                                        <button class="btn btn-secondary btn-small" @click="checkProxyProfile(p.id)">检测</button>
+                                        <button class="btn btn-primary btn-small" @click="openProxyModal(p)">编辑</button>
+                                        <button class="btn btn-danger btn-small" @click="deleteProxyProfile(p.id)">删除</button>
                                     </div>
                                 </td>
                             </tr>
                         </tbody>
                     </table>
-                    <div v-else class="empty-state">暂无上传任务</div>
+                    <div v-else class="empty-state">暂无代理 Profile</div>
+                </div>
+
+                <!-- 常用发表位置 —— 用户在批量上传"发表位置"输入框里可直接下拉选择 -->
+                <div class="card">
+                    <div class="flex-between" style="margin-bottom: 16px;">
+                        <div class="card-title" style="margin-bottom: 0;">常用发表位置</div>
+                    </div>
+                    <div class="form-group" style="display: flex; gap: 8px;">
+                        <input
+                            v-model.trim="newFavoriteLocation"
+                            type="text"
+                            placeholder="例如：深圳人民公园、上海陆家嘴、北京三里屯"
+                            @keyup.enter="addFavoriteLocation"
+                            style="flex: 1;"
+                        />
+                        <button class="btn btn-primary btn-small" @click="addFavoriteLocation" :disabled="!newFavoriteLocation">+ 添加</button>
+                    </div>
+                    <table class="table" v-if="favoriteLocations.length">
+                        <thead>
+                            <tr>
+                                <th style="width: 56px;">序号</th>
+                                <th>位置名称</th>
+                                <th style="width: 160px;">创建时间</th>
+                                <th style="width: 100px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(loc, idx) in favoriteLocations" :key="loc.id">
+                                <td>{{ idx + 1 }}</td>
+                                <td>{{ loc.name }}</td>
+                                <td>{{ formatDate(loc.created_at) }}</td>
+                                <td>
+                                    <button class="btn btn-danger btn-small" @click="deleteFavoriteLocation(loc.id)">删除</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="empty-state">暂无常用位置；添加后可在批量上传页的「发表位置」下拉选择</div>
                 </div>
             </div>
 
@@ -1724,6 +2065,49 @@ app.component('weixin-page', {
                     </div>
                 </div>
             </div>
+
+            <div v-if="showProxyModal" class="modal-overlay" @click.self="closeProxyModal">
+                <div class="modal-box">
+                    <h3>{{ proxyForm.id ? '编辑代理 Profile' : '添加代理 Profile' }}</h3>
+                    <div class="form-group">
+                        <label>名称</label>
+                        <input v-model.trim="proxyForm.name" type="text" placeholder="例如：深圳 01">
+                    </div>
+                    <div class="row">
+                        <div class="col">
+                            <div class="form-group">
+                                <label>协议</label>
+                                <select v-model="proxyForm.scheme">
+                                    <option value="http">HTTP</option>
+                                    <option value="socks5">Socks5</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-group">
+                                <label>主机</label>
+                                <input v-model.trim="proxyForm.host" type="text" placeholder="127.0.0.1">
+                            </div>
+                        </div>
+                        <div class="col">
+                            <div class="form-group">
+                                <label>端口</label>
+                                <input v-model.number="proxyForm.port" type="number" min="1" max="65535">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" v-model="proxyForm.enabled">
+                            启用
+                        </label>
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" @click="closeProxyModal">取消</button>
+                        <button class="btn btn-primary" @click="saveProxyProfile" :disabled="!proxyForm.name || !proxyForm.host || !proxyForm.port">保存</button>
+                    </div>
+                </div>
+            </div>
         </div>
     `,
 
@@ -1737,18 +2121,51 @@ app.component('weixin-page', {
         const tasks = ref([]);
         const selectedTaskIds = ref([]);
         const schedules = ref([]);
+        const proxyProfiles = ref([]);
+        const favoriteLocations = ref([]);
+        const newFavoriteLocation = ref('');
+        // 发表位置自定义 combobox：是否展开下拉浮层
+        const showLocationDropdown = ref(false);
+        // 给 combobox 容器拿一个 ref，点击外部时用来判定是否要关闭浮层
+        const locationComboboxRef = ref(null);
+        // 上传代理同款 combobox 的状态
+        const showProxyDropdown = ref(false);
+        const proxyComboboxRef = ref(null);
         const showAddAccount = ref(false);
+        const showProxyModal = ref(false);
         const newAccountName = ref('');
         const refreshingIds = ref(new Set());
         const isBrowsingBatchFiles = ref(false);
+        const checkingAllProxies = ref(false);
         const message = reactive({ show: false, type: 'info', text: '' });
+        const proxyForm = reactive({
+            id: null,
+            name: '',
+            scheme: 'http',
+            host: '127.0.0.1',
+            port: 0,
+            enabled: true
+        });
+
+        // 启动时的全量账号刷新状态。Polling 后端 /accounts/refresh-status 得到。
+        // is_refreshing=true 期间：账号管理页所有按钮 disable，避免与浏览器自动化冲突。
+        const refreshAllState = reactive({
+            is_refreshing: false,
+            started_at: null,
+            finished_at: null,
+            last_stats: null,
+            last_error: null,
+        });
+        let refreshPollTimer = null;
 
         const DEFAULT_BATCH_DESCRIPTION = '#ys点击上方❤【免费剧集】0元看全集';
         const batchForm = reactive({
             account_id: '',
             videoFiles: [],
             descriptionStr: DEFAULT_BATCH_DESCRIPTION,
-            drama_link: ''
+            drama_link: '',
+            proxy_profile_id: '',
+            location_label: ''
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -1784,6 +2201,13 @@ app.component('weixin-page', {
         function getAccountName(id) {
             const a = accounts.value.find(a => a.id === id);
             return a ? a.name : '#' + id;
+        }
+
+        const enabledProxyProfiles = computed(() => proxyProfiles.value.filter(p => p.enabled));
+
+        function proxyProfileOptionLabel(p) {
+            const city = p.last_city || p.last_region || p.last_country || '未检测';
+            return `${p.name} - ${city}`;
         }
 
         function getStatusClass(s) {
@@ -1870,6 +2294,164 @@ app.component('weixin-page', {
                 schedules.value = res.schedules || [];
             } catch (e) {
                 console.error(e);
+            }
+        }
+
+        async function loadProxyProfiles() {
+            try {
+                const res = await props.api.getWeixinProxyProfiles();
+                proxyProfiles.value = res.profiles || [];
+            } catch (e) {
+                showMessage('加载代理 Profile 失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function loadFavoriteLocations() {
+            try {
+                const res = await props.api.listWeixinFavoriteLocations();
+                favoriteLocations.value = res.locations || [];
+            } catch (e) {
+                showMessage('加载常用位置失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function addFavoriteLocation() {
+            const name = (newFavoriteLocation.value || '').trim();
+            if (!name) return;
+            try {
+                await props.api.createWeixinFavoriteLocation(name);
+                newFavoriteLocation.value = '';
+                await loadFavoriteLocations();
+                showMessage('已添加常用位置', 'success');
+            } catch (e) {
+                showMessage('添加失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function deleteFavoriteLocation(id) {
+            if (!confirm('确定删除该常用位置？')) return;
+            try {
+                await props.api.deleteWeixinFavoriteLocation(id);
+                await loadFavoriteLocations();
+                showMessage('已删除', 'success');
+            } catch (e) {
+                showMessage('删除失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        // 用户输入文字时，下拉里只显示包含该文字的候选；没输入时全部显示
+        const filteredFavoriteLocations = computed(() => {
+            const q = (batchForm.location_label || '').trim().toLowerCase();
+            if (!q) return favoriteLocations.value;
+            return favoriteLocations.value.filter(l => (l.name || '').toLowerCase().includes(q));
+        });
+
+        function selectFavoriteLocation(name) {
+            batchForm.location_label = name;
+            showLocationDropdown.value = false;
+        }
+
+        // 上传代理 combobox 当前选中项的展示文案
+        const selectedProxyDisplay = computed(() => {
+            const id = batchForm.proxy_profile_id;
+            if (!id && id !== 0) return '不指定代理 Profile';
+            const p = enabledProxyProfiles.value.find(x => x.id === parseInt(id));
+            return p ? proxyProfileOptionLabel(p) : '不指定代理 Profile';
+        });
+
+        function selectProxyProfile(id) {
+            batchForm.proxy_profile_id = id;
+            showProxyDropdown.value = false;
+        }
+
+        // 点击 combobox 外部时关闭下拉浮层（mousedown 比 click 更稳，可避开按钮自身 click）
+        function handleClickOutsideComboboxes(event) {
+            const locRoot = locationComboboxRef.value;
+            if (locRoot && !locRoot.contains(event.target)) {
+                showLocationDropdown.value = false;
+            }
+            const proxyRoot = proxyComboboxRef.value;
+            if (proxyRoot && !proxyRoot.contains(event.target)) {
+                showProxyDropdown.value = false;
+            }
+        }
+
+        function openProxyModal(profile = null) {
+            if (profile) {
+                proxyForm.id = profile.id;
+                proxyForm.name = profile.name || '';
+                proxyForm.scheme = profile.scheme || 'http';
+                proxyForm.host = profile.host || '127.0.0.1';
+                proxyForm.port = profile.port || 0;
+                proxyForm.enabled = !!profile.enabled;
+            } else {
+                proxyForm.id = null;
+                proxyForm.name = '';
+                proxyForm.scheme = 'http';
+                proxyForm.host = '127.0.0.1';
+                proxyForm.port = 0;
+                proxyForm.enabled = true;
+            }
+            showProxyModal.value = true;
+        }
+
+        function closeProxyModal() {
+            showProxyModal.value = false;
+        }
+
+        async function saveProxyProfile() {
+            const payload = {
+                name: proxyForm.name,
+                scheme: proxyForm.scheme,
+                host: proxyForm.host,
+                port: Number(proxyForm.port),
+                enabled: !!proxyForm.enabled
+            };
+            try {
+                if (proxyForm.id) {
+                    await props.api.updateWeixinProxyProfile(proxyForm.id, payload);
+                } else {
+                    await props.api.createWeixinProxyProfile(payload);
+                }
+                closeProxyModal();
+                await loadProxyProfiles();
+                showMessage('代理 Profile 已保存', 'success');
+            } catch (e) {
+                showMessage('保存代理失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function deleteProxyProfile(id) {
+            if (!confirm('确定删除该代理 Profile？')) return;
+            try {
+                await props.api.deleteWeixinProxyProfile(id);
+                await loadProxyProfiles();
+                showMessage('代理 Profile 已删除', 'success');
+            } catch (e) {
+                showMessage('删除代理失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function checkProxyProfile(id) {
+            try {
+                const res = await props.api.checkWeixinProxyProfile(id);
+                await loadProxyProfiles();
+                showMessage(res.status === 'success' ? '代理检测成功' : ('代理检测失败: ' + (res.message || '不可用')), res.status === 'success' ? 'success' : 'error');
+            } catch (e) {
+                showMessage('代理检测失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        async function checkAllProxyProfiles() {
+            checkingAllProxies.value = true;
+            try {
+                await props.api.checkAllWeixinProxyProfiles();
+                await loadProxyProfiles();
+                showMessage('批量检测完成', 'success');
+            } catch (e) {
+                showMessage('批量检测失败: ' + (e.detail || e.message || e), 'error');
+            } finally {
+                checkingAllProxies.value = false;
             }
         }
 
@@ -1966,12 +2548,15 @@ app.component('weixin-page', {
                     descriptions,
                     metadata_source: 'manual',
                     drama_link: batchForm.drama_link || null,
+                    proxy_profile_id: batchForm.proxy_profile_id ? parseInt(batchForm.proxy_profile_id) : null,
+                    location_label: (batchForm.location_label || '').trim() || null,
                 });
                 const totalText = typeof res.total === 'number' ? res.total : batchForm.videoFiles.length;
                 showMessage(res.message || ('批量任务已创建，共 ' + totalText + ' 个'), 'success');
                 batchForm.videoFiles = [];
                 batchForm.descriptionStr = DEFAULT_BATCH_DESCRIPTION;
                 batchForm.drama_link = '';
+                batchForm.location_label = '';
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
             }
@@ -2036,21 +2621,97 @@ app.component('weixin-page', {
             }
         }
 
-        onMounted(() => {
+        async function pollRefreshStatus() {
+            try {
+                const res = await props.api.getWeixinAccountsRefreshStatus();
+                const wasRefreshing = refreshAllState.is_refreshing;
+                refreshAllState.is_refreshing = !!res.is_refreshing;
+                refreshAllState.started_at = res.started_at ?? null;
+                refreshAllState.finished_at = res.finished_at ?? null;
+                refreshAllState.last_stats = res.last_stats ?? null;
+                refreshAllState.last_error = res.last_error ?? null;
+                // 刚结束这一次刷新：自动拉取最新账号列表，并停掉 polling
+                if (wasRefreshing && !refreshAllState.is_refreshing) {
+                    await loadAccounts();
+                    stopRefreshPolling();
+                    const s = refreshAllState.last_stats;
+                    if (s) {
+                        showMessage(
+                            `账号刷新完成：有效 ${s.valid}，过期 ${s.expired}，异常 ${s.errors}，跳过 ${s.skipped}`,
+                            (s.errors > 0 || refreshAllState.last_error) ? 'error' : 'success'
+                        );
+                    }
+                }
+            } catch (e) {
+                console.error('refresh-status poll failed', e);
+            }
+        }
+
+        function startRefreshPolling() {
+            if (refreshPollTimer) return;
+            refreshPollTimer = setInterval(pollRefreshStatus, 1500);
+        }
+        function stopRefreshPolling() {
+            if (refreshPollTimer) {
+                clearInterval(refreshPollTimer);
+                refreshPollTimer = null;
+            }
+        }
+
+        async function triggerRefreshAll() {
+            try {
+                const res = await props.api.refreshAllWeixinAccounts();
+                if (res.status === 'running') {
+                    showMessage('刷新已在进行中', 'info');
+                } else {
+                    showMessage('已触发全量账号刷新', 'info');
+                }
+                refreshAllState.is_refreshing = true;
+                startRefreshPolling();
+            } catch (e) {
+                showMessage('触发刷新失败: ' + (e.detail || e.message || e), 'error');
+            }
+        }
+
+        onMounted(async () => {
+            // 启动时先取一次刷新状态：后端 lifespan 已经在跑一次全量刷新，
+            // 这里立刻 poll 进度并在刷新中显示遮罩
+            await pollRefreshStatus();
+            if (refreshAllState.is_refreshing) {
+                startRefreshPolling();
+            }
             loadAccounts();
             loadSchedules();
+            loadProxyProfiles();
+            // 批量上传页的位置下拉也依赖常用位置，提前加载一次
+            loadFavoriteLocations();
+            // 监听全局 mousedown，点 combobox 外部时收起浮层（同时管发表位置 / 上传代理两个）
+            document.addEventListener('mousedown', handleClickOutsideComboboxes);
+        });
+
+        onBeforeUnmount(() => {
+            stopRefreshPolling();
+            document.removeEventListener('mousedown', handleClickOutsideComboboxes);
         });
 
         return {
-            tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, message, refreshingIds,
-            isBrowsingBatchFiles,
+            tab, accounts, tasks, selectedTaskIds, schedules, proxyProfiles,
+            favoriteLocations, newFavoriteLocation,
+            showLocationDropdown, locationComboboxRef, filteredFavoriteLocations, selectFavoriteLocation,
+            showProxyDropdown, proxyComboboxRef, selectedProxyDisplay, selectProxyProfile,
+            showAddAccount, showProxyModal, newAccountName, message, refreshingIds,
+            isBrowsingBatchFiles, checkingAllProxies, refreshAllState,
+            proxyForm, enabledProxyProfiles,
             batchForm, scheduleForm,
-            formatDate, getFileName, getAccountName,
+            formatDate, getFileName, getAccountName, proxyProfileOptionLabel,
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
             isTaskActive, selectableTaskIds, isAllSelectableSelected, isPartiallySelected,
             toggleSelectAllTasks, deleteSelectedTasks,
-            loadAccounts, loadTasks, loadSchedules,
+            loadAccounts, loadTasks, loadSchedules, loadProxyProfiles, triggerRefreshAll,
+            loadFavoriteLocations, addFavoriteLocation, deleteFavoriteLocation,
             addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
+            openProxyModal, closeProxyModal, saveProxyProfile, deleteProxyProfile,
+            checkProxyProfile, checkAllProxyProfiles,
             browseBatchFiles, removeBatchFile,
             createBatchUpload,
             retryTask, deleteTask,

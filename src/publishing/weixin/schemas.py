@@ -61,6 +61,56 @@ class BatchUploadCreate(BaseModel):
     )
     scheduled_at: Optional[datetime] = Field(None, description="定时发布时间（第一个视频的时间，后续依次递增）")
     drama_link: Optional[str] = Field(None, description="视频号剧集名称")
+    proxy_profile_id: Optional[int] = Field(None, description="代理 Profile ID")
+    location_label: Optional[str] = Field(None, description="手动选择的位置名称")
+
+
+class ProxyProfileCreate(BaseModel):
+    """创建代理 Profile 请求"""
+    name: str = Field(..., min_length=1, max_length=80)
+    scheme: str = Field("http", pattern="^(http|socks5)$")
+    host: str = Field("127.0.0.1", min_length=1, max_length=255)
+    port: int = Field(..., ge=1, le=65535)
+    enabled: bool = True
+
+
+class ProxyProfileUpdate(BaseModel):
+    """更新代理 Profile 请求"""
+    name: Optional[str] = Field(None, min_length=1, max_length=80)
+    scheme: Optional[str] = Field(None, pattern="^(http|socks5)$")
+    host: Optional[str] = Field(None, min_length=1, max_length=255)
+    port: Optional[int] = Field(None, ge=1, le=65535)
+    enabled: Optional[bool] = None
+
+
+class FavoriteLocationCreate(BaseModel):
+    """新增常用发表位置"""
+    name: str = Field(..., min_length=1, max_length=80, description="位置名称（如：深圳人民公园）")
+
+
+class FavoriteLocationInfo(BaseModel):
+    """常用发表位置信息"""
+    id: int
+    name: str
+    created_at: datetime
+
+
+class ProxyProfileInfo(BaseModel):
+    """代理 Profile 信息"""
+    id: int
+    name: str
+    scheme: str
+    host: str
+    port: int
+    enabled: bool
+    last_checked_at: Optional[datetime] = None
+    last_ip: Optional[str] = None
+    last_country: Optional[str] = None
+    last_region: Optional[str] = None
+    last_city: Optional[str] = None
+    last_isp: Optional[str] = None
+    last_check_error: Optional[str] = None
+    created_at: datetime
 
 
 class TaskInfo(BaseModel):

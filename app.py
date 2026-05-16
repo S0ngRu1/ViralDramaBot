@@ -59,15 +59,28 @@ sys.path.insert(0, str(project_root))
 from src.ingestion.douyin import get_downloader, DouyinDownloader
 from src.publishing.weixin.config import WeixinConfig
 from src.publishing.weixin.dao import WeixinDAO
-from src.publishing.weixin.account_manager import AccountManager, CookieChecker
+from src.publishing.weixin.account_manager import (
+    AccountManager,
+    CookieChecker,
+    account_refresh_state,
+    run_refresh_all_accounts,
+)
 from src.publishing.weixin.uploader import Uploader
 from src.publishing.weixin.scheduler import UploadScheduler
 from src.publishing.weixin.batch_queue import batch_upload_queue
-from src.publishing.weixin.proxy import ProxyCheckError, check_configured_proxy
+from src.publishing.weixin.proxy import (
+    ProxyCheckError,
+    check_profile,
+    check_configured_proxy,
+    invalidate_proxy_check_cache,
+    _friendly_proxy_error,
+)
 from src.publishing.weixin.schemas import (
     AccountCreate, AccountStatus, TaskStatus,
     BatchUploadCreate, ScheduleCreate,
     MetadataSource, TaskBatchDeleteRequest,
+    ProxyProfileCreate, ProxyProfileUpdate,
+    FavoriteLocationCreate,
 )
 
 # ===== 新增：数据目录自动适配 =====
@@ -119,6 +132,9 @@ async def lifespan(app):
     weixin_cookie_checker.start()
     # 启动批量上传串行队列
     batch_upload_queue.start()
+    # 启动后即在后台跑一次全量账号刷新，让前端看到的状态最新；
+    # 不阻塞 lifespan，前端通过 /accounts/refresh-status 轮询进度。
+    run_refresh_all_accounts(weixin_account_mgr)
     yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
@@ -1123,6 +1139,8 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
         WeixinConfig.PROXY_HOST = config.weixin_proxy_host
         WeixinConfig.PROXY_PORT = config.weixin_proxy_port
         WeixinConfig.LOCATION_MODE = config.weixin_location_mode
+        # 配置改了，进程内的代理检测缓存必须失效，下次上传 / 测试要走实网
+        invalidate_proxy_check_cache()
 
         logger.info(f"✅ 应用设置已更新: {settings}")
 
@@ -1148,17 +1166,163 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
 
 @app.get("/api/weixin/proxy/test")
 async def test_weixin_proxy() -> Dict[str, Any]:
-    """Test the configured Weixin upload proxy and return detected IP location."""
+    """测试当前代理配置，返回检测到的出口 IP 和归属地。"""
     try:
+        # 用户点击「测试代理」是想看实时状态，必须绕过缓存。
+        # 但测试完成后顺手把这一次结果作为新缓存写回，省得紧接着第一个上传任务又打一次。
+        invalidate_proxy_check_cache()
         result = check_configured_proxy(strict_same_ip=True)
         if not result.get("enabled"):
-            return {"status": "failed", "message": "Weixin proxy is disabled"}
+            return {"status": "failed", "message": "代理未启用"}
         return {"status": "success", "result": result}
     except ProxyCheckError as e:
         return {"status": "failed", "message": str(e)}
     except Exception as e:
-        logger.error(f"Weixin proxy test failed: {e}")
+        logger.error(f"代理测试失败: {e}")
         return {"status": "failed", "message": str(e)}
+
+
+@app.get("/api/weixin/proxy-profiles")
+async def weixin_list_proxy_profiles() -> Dict[str, Any]:
+    profiles = weixin_dao.list_proxy_profiles()
+    return {"status": "success", "profiles": profiles, "total": len(profiles)}
+
+
+@app.post("/api/weixin/proxy-profiles")
+async def weixin_create_proxy_profile(request: ProxyProfileCreate) -> Dict[str, Any]:
+    profile_id = weixin_dao.create_proxy_profile(
+        name=request.name,
+        scheme=request.scheme,
+        host=request.host,
+        port=request.port,
+        enabled=request.enabled,
+    )
+    return {
+        "status": "success",
+        "profile": weixin_dao.get_proxy_profile(profile_id),
+        "message": "代理 Profile 已创建",
+    }
+
+
+@app.put("/api/weixin/proxy-profiles/{profile_id}")
+async def weixin_update_proxy_profile(
+    profile_id: int, request: ProxyProfileUpdate
+) -> Dict[str, Any]:
+    success = weixin_dao.update_proxy_profile(
+        profile_id,
+        **request.model_dump(exclude_unset=True),
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="代理 Profile 不存在")
+    invalidate_proxy_check_cache()
+    return {
+        "status": "success",
+        "profile": weixin_dao.get_proxy_profile(profile_id),
+        "message": "代理 Profile 已更新",
+    }
+
+
+@app.delete("/api/weixin/proxy-profiles/{profile_id}")
+async def weixin_delete_proxy_profile(profile_id: int) -> Dict[str, Any]:
+    success = weixin_dao.delete_proxy_profile(profile_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="代理 Profile 不存在")
+    invalidate_proxy_check_cache()
+    return {"status": "success", "message": "代理 Profile 已删除"}
+
+
+@app.post("/api/weixin/proxy-profiles/{profile_id}/check")
+async def weixin_check_proxy_profile(profile_id: int) -> Dict[str, Any]:
+    profile = weixin_dao.get_proxy_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="代理 Profile 不存在")
+    try:
+        result = check_profile(profile)
+        weixin_dao.update_proxy_profile_check_result(
+            profile_id,
+            result.get("ip") or None,
+            result.get("country") or None,
+            result.get("region") or None,
+            result.get("city") or None,
+            result.get("isp") or None,
+            None,
+        )
+        return {
+            "status": "success",
+            "result": result,
+            "profile": weixin_dao.get_proxy_profile(profile_id),
+        }
+    except ProxyCheckError as e:
+        # 已经是友好文案，直接用
+        msg = str(e)
+        weixin_dao.update_proxy_profile_check_result(profile_id, None, None, None, None, None, msg)
+        return {"status": "failed", "message": msg, "profile": weixin_dao.get_proxy_profile(profile_id)}
+    except Exception as e:
+        # requests 等底层异常 —— 走一次同样的归类器，避免裸 stack trace 流向前端
+        logger.warning(f"代理 Profile #{profile_id} 检测异常：{e}")
+        msg = _friendly_proxy_error([str(e)])
+        weixin_dao.update_proxy_profile_check_result(profile_id, None, None, None, None, None, msg)
+        return {"status": "failed", "message": msg, "profile": weixin_dao.get_proxy_profile(profile_id)}
+
+
+@app.post("/api/weixin/proxy-profiles/check-all")
+async def weixin_check_all_proxy_profiles() -> Dict[str, Any]:
+    profiles = [p for p in weixin_dao.list_proxy_profiles() if p.get("enabled")]
+    results = []
+    for profile in profiles:
+        profile_id = profile["id"]
+        try:
+            result = check_profile(profile)
+            weixin_dao.update_proxy_profile_check_result(
+                profile_id,
+                result.get("ip") or None,
+                result.get("country") or None,
+                result.get("region") or None,
+                result.get("city") or None,
+                result.get("isp") or None,
+                None,
+            )
+            results.append({"profile_id": profile_id, "status": "success", "result": result})
+        except ProxyCheckError as e:
+            msg = str(e)
+            weixin_dao.update_proxy_profile_check_result(profile_id, None, None, None, None, None, msg)
+            results.append({"profile_id": profile_id, "status": "failed", "message": msg})
+        except Exception as e:
+            logger.warning(f"批量检测代理 Profile #{profile_id} 异常：{e}")
+            msg = _friendly_proxy_error([str(e)])
+            weixin_dao.update_proxy_profile_check_result(profile_id, None, None, None, None, None, msg)
+            results.append({"profile_id": profile_id, "status": "failed", "message": msg})
+    return {"status": "success", "results": results, "profiles": weixin_dao.list_proxy_profiles()}
+
+
+# ---- 常用发表位置 ----
+
+@app.get("/api/weixin/favorite-locations")
+async def weixin_list_favorite_locations() -> Dict[str, Any]:
+    """获取所有常用发表位置（按 id 升序）。"""
+    return {"status": "success", "locations": weixin_dao.list_favorite_locations()}
+
+
+@app.post("/api/weixin/favorite-locations")
+async def weixin_create_favorite_location(request: FavoriteLocationCreate) -> Dict[str, Any]:
+    """新增常用发表位置。重复名称会复用现有记录。"""
+    try:
+        location_id = weixin_dao.create_favorite_location(request.name)
+        return {"status": "success", "location_id": location_id,
+                "locations": weixin_dao.list_favorite_locations()}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"新增常用发表位置失败：{e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/weixin/favorite-locations/{location_id}")
+async def weixin_delete_favorite_location(location_id: int) -> Dict[str, Any]:
+    success = weixin_dao.delete_favorite_location(location_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="位置不存在")
+    return {"status": "success", "locations": weixin_dao.list_favorite_locations()}
 
 
 @app.post("/api/weixin/accounts")
@@ -1236,7 +1400,7 @@ async def weixin_open_post_list(account_id: int) -> Dict[str, Any]:
     Thread(target=run_open, daemon=True).start()
     return {
         "status": "started",
-        "message": "正在打开视频管理页（可与上传并行；若已开着 viewer 再点需先关旧窗口）",
+        "message": "正在打开视频管理页",
     }
 
 
@@ -1247,6 +1411,22 @@ async def weixin_check_cookies(background_tasks: BackgroundTasks) -> Dict[str, A
         weixin_account_mgr.check_all_accounts_cookies()
     background_tasks.add_task(do_check)
     return {"status": "started", "message": "Cookie 检查已在后台启动"}
+
+
+@app.get("/api/weixin/accounts/refresh-status")
+async def weixin_accounts_refresh_status() -> Dict[str, Any]:
+    """全量账号刷新状态（前端 polling 用）：是否正在刷新、上次起止时间、最近统计。"""
+    return {"status": "success", **account_refresh_state.snapshot()}
+
+
+@app.post("/api/weixin/accounts/refresh-all")
+async def weixin_accounts_refresh_all() -> Dict[str, Any]:
+    """手动触发一次全量账号刷新（已在跑则不重复触发）。"""
+    snap_before = account_refresh_state.snapshot()
+    if snap_before.get("is_refreshing"):
+        return {"status": "running", "message": "已有刷新任务在进行中"}
+    run_refresh_all_accounts(weixin_account_mgr)
+    return {"status": "started", "message": "全量账号刷新已启动"}
 
 
 @app.delete("/api/weixin/accounts/{account_id}")
@@ -1291,12 +1471,16 @@ async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
                 description=desc,
                 tags=None,
                 metadata_source=request.metadata_source.value,
+                proxy_profile_id=request.proxy_profile_id,
+                location_label=(request.location_label or "").strip() or None,
             )
             task_ids.append(task_id)
 
         account_id = request.account_id
         metadata_source = request.metadata_source.value
         drama_link = request.drama_link
+        proxy_profile_id = request.proxy_profile_id
+        location_label = (request.location_label or "").strip() or None
 
         def do_batch_upload():
             for idx, task_id in enumerate(task_ids):
@@ -1311,6 +1495,8 @@ async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
                     description=task.get("description"),
                     metadata_source=metadata_source,
                     drama_link=drama_link,
+                    proxy_profile_id=proxy_profile_id,
+                    location_label=location_label,
                 )
                 if (
                     result.get("status") == "success"
@@ -1440,6 +1626,8 @@ async def weixin_retry_task(task_id: int, background_tasks: BackgroundTasks) -> 
                 title=task.get("title"),
                 description=task.get("description"),
                 metadata_source=task.get("metadata_source", "manual"),
+                proxy_profile_id=task.get("proxy_profile_id"),
+                location_label=task.get("location_label"),
             )
 
         background_tasks.add_task(do_retry)

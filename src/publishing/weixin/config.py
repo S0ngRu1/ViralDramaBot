@@ -42,9 +42,25 @@ class WeixinConfig:
     SUPPORTED_VIDEO_FORMATS = [".mp4", ".mov", ".avi", ".mkv", ".flv", ".wmv"]
     MAX_VIDEO_SIZE_MB = 2048  # 最大视频大小（MB）
 
+    # 上传时跳过代理的域名通配符列表。
+    # 抓包（net-export）确认视频号上传字节流分布在多个 CDN：
+    #   - `finderassistance{a,b,c,d}.video.qq.com`（短视频/封面）
+    #   - `mmec.wxqcloud.qq.com.cn` / `aladin.wxqcloud.qq.com`（多媒体边缘云，大文件主力 CDN）
+    # 只 bypass `*.video.qq.com` 时，wxqcloud 系列仍走代理 → 上传被代理带宽拖慢。
+    # SPA 接口（channels.weixin.qq.com）保持走代理，视频号按代理 IP 反查位置的行为不变。
+    UPLOAD_BYPASS_HOSTS = [
+        "*.video.qq.com",          # 视频流上传 / 下载 / 缩略图
+        "*.qpic.cn",               # 视频封面 / 头像 CDN
+        "*.wxqcloud.qq.com",       # 腾讯多媒体边缘云（aladin 等）
+        "*.wxqcloud.qq.com.cn",    # 同上 .cn 域（mmec 等，实际上传 chunk 落点）
+    ]
+
     # 定时调度配置
     SCHEDULER_TIMEZONE = "Asia/Shanghai"
-    PROXY_ENABLED = os.getenv("WEIXIN_PROXY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    # 默认值与 src/core/config.py 的 DEFAULT_WEIXIN_PROXY_ENABLED 对齐（默认开启）。
+    # 注意：app.py lifespan 会用 config.weixin_proxy_enabled 覆盖这个静态值，所以真正运行时
+    # 看的是用户保存的设置；这里的默认只在「环境变量未配 + 没有 settings」时生效。
+    PROXY_ENABLED = os.getenv("WEIXIN_PROXY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
     PROXY_SCHEME = os.getenv("WEIXIN_PROXY_SCHEME", "http").strip().lower()
     PROXY_HOST = os.getenv("WEIXIN_PROXY_HOST", "127.0.0.1").strip()
     PROXY_PORT = int(os.getenv("WEIXIN_PROXY_PORT", "0") or "0")

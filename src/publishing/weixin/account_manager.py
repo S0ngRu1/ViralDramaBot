@@ -7,6 +7,7 @@
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,11 @@ from src.core.logger import logger
 
 # Cookie 轮询间隔（秒）
 COOKIE_CHECK_INTERVAL_SECONDS = 3600  # 每小时检查一次
+
+# 批量刷新账号 Cookie 时的最大并发数。
+# 每路并发会起一个 headless Edge 实例（~150MB 内存），3 路是性价比甜点；
+# 太大会让本机 CPU/内存吃紧反而更慢，也会让本地代理端口（如爱加速 1080）被高频 CONNECT 打到 5xx。
+COOKIE_REFRESH_MAX_WORKERS = 3
 
 # Per-account 锁：防止 Cookie 检查与上传任务同时操作同一账号的浏览器 user_data_dir
 _account_locks: dict[int, threading.Lock] = {}
@@ -144,10 +150,16 @@ class AccountManager:
 
         page = None
         try:
-            page = self._create_headless_browser(cookie_path)
+            # Cookie 验证不走代理：这一步只是查登录态，没风控压力；代理握手反而拖慢，
+            # 而且批量并发刷新时会把本地代理端口打到 5xx。
+            page = self._create_headless_browser(cookie_path, proxy_url=None)
             self._load_cookies(page, cookie_path)
             page.get(WeixinConfig.CHANNELS_URL)
-            time.sleep(3)
+            # 不再 time.sleep —— 下面 _check_login_status 内部用 page.ele(timeout=N) 已经会等元素
+            try:
+                page.get(WeixinConfig.POST_LIST_URL)
+            except Exception as e:
+                logger.warning(f"Cookie 二次验证打开视频列表页失败：{e}")
 
             result = self._check_login_status(page)
             if result["success"]:
@@ -279,8 +291,9 @@ class AccountManager:
 
             # 检查是否已离开登录页面（登录成功）
             if "channels.weixin.qq.com" in url and "/login" not in url:
-                # 检查是否有用户信息元素
-                user_elem = page.ele("css:.user-info, .avatar, .nickname", timeout=2)
+                # 检查是否有用户信息元素 —— 给 Vue SPA 更多渲染时间，原来 2s 在
+                # 删除 time.sleep(3) 后偶尔不够；同时 cookie 兜底也能补上。
+                user_elem = page.ele("css:.user-info, .avatar, .nickname", timeout=5)
                 if user_elem:
                     return {"success": True, "error": None}
                 # 备用检测：检查 cookie 中是否有关键 token
@@ -362,7 +375,7 @@ class AccountManager:
             return None
 
     @staticmethod
-    def _create_headless_browser(cookie_path: str) -> ChromiumPage:
+    def _create_headless_browser(cookie_path: str, proxy_url: Optional[str] = None) -> ChromiumPage:
         """创建无头浏览器（用于后台 Cookie 验证，不弹窗）"""
         options = ChromiumOptions()
         if WeixinConfig.BROWSER_PATH:
@@ -371,11 +384,15 @@ class AccountManager:
         options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--no-sandbox")
-        apply_weixin_proxy(options)
+        apply_weixin_proxy(options, proxy_url=proxy_url)
         user_data_dir = str(
             WeixinConfig.COOKIES_DIR / f"profile_{hash(cookie_path)}"
         )
         options.set_user_data_path(user_data_dir)
+        # 关键：并发刷新场景下多个 Chromium 实例若共用默认 9222 调试端口会互相顶替
+        # （症状：刚启动的实例「与页面的连接已断开」，或后启动的检查同时被判失败）。
+        # auto_port 让每个实例自动选可用端口。
+        options.auto_port(True)
         return ChromiumPage(options)
 
     def _save_cookies(self, page: ChromiumPage, cookie_path: str):
@@ -403,6 +420,80 @@ class AccountManager:
         except Exception:
             return None
 
+    def refresh_all_accounts(self) -> dict:
+        """
+        全量刷新所有账号的状态：不论数据库里的旧状态是 active 还是 expired，都尝试用
+        现有 Cookie 验证一次，更新 status。服务启动时调用，目的是让重启后看到的状态最新。
+
+        这与 `check_all_accounts_cookies` 的差异：那个方法只对 active 账号做心跳，
+        本方法对所有账号无差别验证，能"复活"那些其实 Cookie 仍有效但数据库写着 expired 的账号。
+
+        跳过条件：账号有正在进行的上传任务（与上传共用 user_data_dir，并发会冲突）。
+
+        Returns:
+            dict: {"total": int, "checked": int, "valid": int, "expired": int, "errors": int, "skipped": int}
+        """
+        accounts = self.dao.get_all_accounts()
+        stats = {
+            "total": len(accounts),
+            "checked": 0,
+            "valid": 0,
+            "expired": 0,
+            "errors": 0,
+            "skipped": 0,
+        }
+        # 先把有活跃任务的账号筛掉（与上传共用 user_data_dir，并发会冲突）
+        checkable: list[dict] = []
+        for account in accounts:
+            if self.dao.has_active_task(account["id"]):
+                stats["skipped"] += 1
+                logger.info(f"[启动刷新] 账号 {account['name']} 有上传任务进行中，跳过")
+            else:
+                checkable.append(account)
+
+        if not checkable:
+            logger.info(f"[启动刷新] 完成 — 共 {stats['total']} 个账号，全部跳过")
+            return stats
+
+        stats_lock = threading.Lock()
+        started = time.time()
+
+        def _check_one(account: dict) -> None:
+            account_id = account["id"]
+            account_name = account["name"]
+            try:
+                lock = get_account_lock(account_id)
+                with lock:
+                    ok = self._auto_login_internal(account_id)
+                with stats_lock:
+                    stats["checked"] += 1
+                    if ok:
+                        stats["valid"] += 1
+                        logger.info(f"[启动刷新] 账号 {account_name} Cookie 有效")
+                    else:
+                        stats["expired"] += 1
+                        logger.warning(f"[启动刷新] 账号 {account_name} Cookie 已过期")
+            except Exception as e:
+                with stats_lock:
+                    stats["checked"] += 1
+                    stats["errors"] += 1
+                logger.error(f"[启动刷新] 账号 {account_name} 检查异常: {e}")
+
+        workers = min(COOKIE_REFRESH_MAX_WORKERS, len(checkable))
+        logger.info(f"[启动刷新] 开始并发刷新 {len(checkable)} 个账号（并发={workers}）")
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="WeixinAcctRefresh") as pool:
+            futures = [pool.submit(_check_one, a) for a in checkable]
+            for _ in as_completed(futures):
+                pass
+
+        elapsed = time.time() - started
+        logger.info(
+            f"[启动刷新] 完成 — 共 {stats['total']} 个账号，检查 {stats['checked']}，"
+            f"有效 {stats['valid']}，过期 {stats['expired']}，异常 {stats['errors']}，"
+            f"跳过 {stats['skipped']}，耗时 {elapsed:.1f}s"
+        )
+        return stats
+
     def check_all_accounts_cookies(self) -> dict:
         """
         批量检查所有活跃账号的 Cookie 有效性
@@ -414,43 +505,136 @@ class AccountManager:
         accounts = self.dao.get_all_accounts()
         stats = {"checked": 0, "valid": 0, "expired": 0, "errors": 0, "skipped": 0}
 
+        # 先把目标账号筛出来（active 状态、且没有在跑的上传任务）
+        checkable: list[dict] = []
         for account in accounts:
-            # 只检查状态为 ACTIVE 的账号
             if account["status"] != AccountStatus.ACTIVE.value:
                 continue
+            if self.dao.has_active_task(account["id"]):
+                stats["skipped"] += 1
+                logger.info(f"[Cookie轮询] 账号 {account['name']} 有上传任务进行中，跳过检查")
+                continue
+            checkable.append(account)
 
+        if not checkable:
+            if stats["skipped"]:
+                logger.info(f"[Cookie轮询] 完成 — 全部跳过（{stats['skipped']}）")
+            return stats
+
+        stats_lock = threading.Lock()
+        started = time.time()
+
+        def _check_one(account: dict) -> None:
             account_id = account["id"]
             account_name = account["name"]
-
-            # 跳过有活跃上传任务的账号，避免浏览器 user_data_dir 冲突
-            if self.dao.has_active_task(account_id):
-                stats["skipped"] += 1
-                logger.info(f"[Cookie轮询] 账号 {account_name} 有上传任务进行中，跳过检查")
-                continue
-
-            stats["checked"] += 1
-
             try:
-                # 使用 _auto_login_internal + per-account 锁，避免死锁
                 lock = get_account_lock(account_id)
                 with lock:
-                    if self._auto_login_internal(account_id):
+                    ok = self._auto_login_internal(account_id)
+                with stats_lock:
+                    stats["checked"] += 1
+                    if ok:
                         stats["valid"] += 1
                         logger.info(f"[Cookie轮询] 账号 {account_name} Cookie有效")
                     else:
                         stats["expired"] += 1
                         logger.warn(f"[Cookie轮询] 账号 {account_name} Cookie已过期")
             except Exception as e:
-                stats["errors"] += 1
+                with stats_lock:
+                    stats["checked"] += 1
+                    stats["errors"] += 1
                 logger.error(f"[Cookie轮询] 账号 {account_name} 检查异常: {e}")
 
-        if stats["checked"] > 0 or stats["skipped"] > 0:
-            logger.info(
-                f"[Cookie轮询] 完成 — 检查 {stats['checked']} 个账号, "
-                f"有效 {stats['valid']}, 过期 {stats['expired']}, 异常 {stats['errors']}, "
-                f"跳过 {stats['skipped']}"
-            )
+        workers = min(COOKIE_REFRESH_MAX_WORKERS, len(checkable))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="WeixinCookieCheck") as pool:
+            futures = [pool.submit(_check_one, a) for a in checkable]
+            for _ in as_completed(futures):
+                pass
+
+        elapsed = time.time() - started
+        logger.info(
+            f"[Cookie轮询] 完成 — 检查 {stats['checked']}（并发{workers}），"
+            f"有效 {stats['valid']}，过期 {stats['expired']}，异常 {stats['errors']}，"
+            f"跳过 {stats['skipped']}，耗时 {elapsed:.1f}s"
+        )
         return stats
+
+
+class AccountRefreshState:
+    """
+    全量账号刷新的运行时状态。
+
+    前端需要在「正在刷新」期间禁用账号管理页的操作，所以把状态做成进程单例可读，
+    通过 `GET /api/weixin/accounts/refresh-status` 暴露给前端 polling。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._is_refreshing = False
+        self._started_at: Optional[float] = None
+        self._finished_at: Optional[float] = None
+        self._last_stats: Optional[dict] = None
+        self._last_error: Optional[str] = None
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "is_refreshing": self._is_refreshing,
+                "started_at": self._started_at,
+                "finished_at": self._finished_at,
+                "last_stats": self._last_stats,
+                "last_error": self._last_error,
+            }
+
+    def try_begin(self) -> bool:
+        """原子地把状态切到「正在刷新」。返回 True 表示成功占用，否则已在跑。"""
+        with self._lock:
+            if self._is_refreshing:
+                return False
+            self._is_refreshing = True
+            self._started_at = time.time()
+            self._finished_at = None
+            self._last_error = None
+            return True
+
+    def finish(self, stats: Optional[dict], error: Optional[str]) -> None:
+        with self._lock:
+            self._is_refreshing = False
+            self._finished_at = time.time()
+            if stats is not None:
+                self._last_stats = stats
+            if error is not None:
+                self._last_error = error
+
+
+# 进程单例
+account_refresh_state = AccountRefreshState()
+
+
+def run_refresh_all_accounts(account_manager: AccountManager) -> None:
+    """
+    在后台线程跑一次全量刷新。占用 / 释放 `account_refresh_state`，方便前端 poll。
+
+    若已有刷新在跑则立即返回，不重复占用浏览器资源。
+    """
+    if not account_refresh_state.try_begin():
+        logger.info("[启动刷新] 已有刷新任务在进行中，跳过本次触发")
+        return
+
+    def _worker() -> None:
+        stats: Optional[dict] = None
+        error: Optional[str] = None
+        try:
+            stats = account_manager.refresh_all_accounts()
+        except Exception as e:
+            error = str(e)
+            logger.error(f"[启动刷新] 执行失败: {e}")
+        finally:
+            account_refresh_state.finish(stats, error)
+
+    threading.Thread(
+        target=_worker, name="WeixinAccountRefreshOnStart", daemon=True
+    ).start()
 
 
 class CookieChecker:

@@ -16,11 +16,27 @@ from .config import WeixinConfig
 from src.core.logger import logger
 
 
-def apply_weixin_proxy(options: ChromiumOptions) -> ChromiumOptions:
-    proxy = WeixinConfig.proxy_url()
+def apply_weixin_proxy(
+    options: ChromiumOptions,
+    proxy_url: Optional[str] = None,
+    bypass_hosts: Optional[list[str]] = None,
+) -> ChromiumOptions:
+    """
+    给 Chromium 启动参数注入代理 + 可选的 bypass 列表。
+
+    bypass_hosts: 这些域名/通配符不走代理（直连）。常用于让"视频上传 CDN"绕开代理 ——
+    上传文件量大、代理通常是按流量/速度计费的瓶颈，所以走直连显著提升上传速度。
+    Chromium 启动参数 `--proxy-bypass-list` 支持 `*.example.com` 这种通配符语法。
+    """
+    proxy = proxy_url if proxy_url is not None else WeixinConfig.proxy_url()
     if proxy:
         options.set_proxy(proxy)
-        logger.info(f"Weixin browser proxy enabled: {proxy}")
+        if bypass_hosts:
+            bypass_str = ";".join(bypass_hosts)
+            options.set_argument(f"--proxy-bypass-list={bypass_str}")
+            logger.info(f"Weixin browser proxy enabled: {proxy} (bypass: {bypass_str})")
+        else:
+            logger.info(f"Weixin browser proxy enabled: {proxy}")
     return options
 
 
@@ -34,7 +50,7 @@ class BrowserPool:
         self._lock = threading.Lock()
         self._created_pages: list[ChromiumPage] = []
 
-    def _create_browser(self, user_data_dir: Optional[str] = None) -> ChromiumPage:
+    def _create_browser(self, user_data_dir: Optional[str] = None, proxy_url: Optional[str] = None) -> ChromiumPage:
         """创建新的浏览器实例"""
         options = ChromiumOptions()
         if WeixinConfig.BROWSER_PATH:
@@ -46,7 +62,7 @@ class BrowserPool:
         options.set_argument("--disable-blink-features=AutomationControlled")
         options.set_argument("--disable-infobars")
         options.set_argument("--no-sandbox")
-        apply_weixin_proxy(options)
+        apply_weixin_proxy(options, proxy_url=proxy_url)
         if user_data_dir:
             options.set_user_data_path(user_data_dir)
         page = ChromiumPage(options)
@@ -54,7 +70,7 @@ class BrowserPool:
         return page
 
     @contextmanager
-    def acquire(self, user_data_dir: Optional[str] = None):
+    def acquire(self, user_data_dir: Optional[str] = None, proxy_url: Optional[str] = None):
         """
         获取浏览器实例（上下文管理器）
 
@@ -75,7 +91,7 @@ class BrowserPool:
             if page is None:
                 with self._lock:
                     if self._active_count < self.max_instances:
-                        page = self._create_browser(user_data_dir)
+                        page = self._create_browser(user_data_dir, proxy_url=proxy_url)
                         self._active_count += 1
                         acquired = True
 
@@ -124,7 +140,11 @@ class BrowserPool:
 browser_pool = BrowserPool()
 
 
-def _chromium_options_with_profile(user_data_dir: str) -> ChromiumOptions:
+def _chromium_options_with_profile(
+    user_data_dir: str,
+    proxy_url: Optional[str] = None,
+    bypass_hosts: Optional[list[str]] = None,
+) -> ChromiumOptions:
     options = ChromiumOptions()
     if WeixinConfig.BROWSER_PATH:
         options.set_browser_path(WeixinConfig.BROWSER_PATH)
@@ -139,24 +159,31 @@ def _chromium_options_with_profile(user_data_dir: str) -> ChromiumOptions:
     options.set_argument("--no-first-run")
     options.set_argument("--disable-sync")
     options.set_argument("--disable-default-apps")
-    apply_weixin_proxy(options)
+    apply_weixin_proxy(options, proxy_url=proxy_url, bypass_hosts=bypass_hosts)
     options.set_user_data_path(user_data_dir)
     # 默认未开启时多个 ChromiumPage 可能争用同一调试端口，后起的会顶替前一个窗口。
     options.auto_port(True)
     return options
 
 
-def get_browser_for_account(account_cookie_path: str) -> ChromiumPage:
+def get_browser_for_account(
+    account_cookie_path: str,
+    proxy_url: Optional[str] = None,
+    bypass_hosts: Optional[list[str]] = None,
+) -> ChromiumPage:
     """
     为指定账号创建独立的浏览器实例（不使用池）
 
-    用于首次扫码登录等需要独立浏览器的场景
+    用于首次扫码登录等需要独立浏览器的场景。
+    bypass_hosts: 走代理时跳过的域名通配符（典型用法：让视频上传 CDN 走直连）。
     """
     # 使用独立的用户数据目录实现会话隔离（上传 / 扫码）
     user_data_dir = str(
         WeixinConfig.COOKIES_DIR / f"profile_{hash(account_cookie_path)}"
     )
-    page = ChromiumPage(_chromium_options_with_profile(user_data_dir))
+    page = ChromiumPage(
+        _chromium_options_with_profile(user_data_dir, proxy_url=proxy_url, bypass_hosts=bypass_hosts)
+    )
     return page
 
 
