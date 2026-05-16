@@ -65,6 +65,9 @@ class BrowserPool:
         apply_weixin_proxy(options, proxy_url=proxy_url)
         if user_data_dir:
             options.set_user_data_path(user_data_dir)
+        # 与 _chromium_options_with_profile 对齐：多实例并发场景下，共用默认 9222
+        # 调试端口会让后启动的 Chromium 顶替前一个；auto_port 让每个实例自己挑端口。
+        options.auto_port(True)
         page = ChromiumPage(options)
         self._created_pages.append(page)
         return page

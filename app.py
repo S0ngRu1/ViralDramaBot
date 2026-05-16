@@ -1487,6 +1487,20 @@ async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
                 task = weixin_dao.get_task(task_id)
                 if not task:
                     continue
+
+                # 从第 2 个视频起：
+                #   - 失效代理检测缓存，强制下一个 upload_video 重新打网验代理。
+                #     默认 5 分钟 TTL 会让批量任务全程复用首次结果，代理在中途挂掉时
+                #     后续视频带着「代理良好」的假结论冲进去就会失败。
+                #   - 额外预留 1.5s 让 Windows 文件系统释放上一个 Edge 的 user-data-dir
+                #     锁；同账号视频共用 user_data_dir，紧接着开下一个偶发抢占。
+                if idx > 0:
+                    try:
+                        invalidate_proxy_check_cache()
+                    except Exception as e:
+                        logger.warning(f"批量上传：失效代理缓存失败（忽略）：{e}")
+                    time.sleep(1.5)
+
                 result = weixin_uploader.upload_video(
                     task_id=task_id,
                     account_id=account_id,

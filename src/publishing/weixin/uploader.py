@@ -187,10 +187,14 @@ class Uploader:
         try:
             # 上传 CDN（*.video.qq.com 等）跳过代理直连，避免代理拖慢/超时；
             # SPA 接口（channels.weixin.qq.com）仍走代理，位置反查行为不变。
+            # 只要"实际会用到代理"（profile 模式给了 proxy_url，或全局开关 PROXY_ENABLED 让
+            # apply_weixin_proxy 内部回退到 WeixinConfig.proxy_url()），就必须挂上 bypass，
+            # 否则全局代理用户会把上传字节流全部塞进代理。
+            proxy_in_use = bool(proxy_url) or WeixinConfig.PROXY_ENABLED
             page = get_browser_for_account(
                 account["cookie_path"],
                 proxy_url=proxy_url,
-                bypass_hosts=WeixinConfig.UPLOAD_BYPASS_HOSTS if proxy_url else None,
+                bypass_hosts=WeixinConfig.UPLOAD_BYPASS_HOSTS if proxy_in_use else None,
             )
             self._load_cookies(page, account["cookie_path"])
 
@@ -703,7 +707,29 @@ class Uploader:
                 logger.warning("位置面板的搜索框未出现，无法按名称搜索")
                 return False
 
-            # 2) 注入文本 + 派发完整事件链
+            # 2) 注入文本前先拍一张「打开面板时默认列表」的指纹。
+            #    面板默认渲染的是"附近位置"列表（与搜索结果共用 .location-item class），
+            #    没有这个指纹就无法分辨"已经返回搜索结果"还是"还在用旧附近列表"——
+            #    早期版本就因为这个 bug，输入"樱桃沟…"后秒选"绿城广场"。
+            def _snapshot_items() -> tuple[str, ...]:
+                try:
+                    raw = page.eles("css:.location-filter-wrap .location-item", timeout=0.5) or []
+                    texts = []
+                    for it in raw:
+                        try:
+                            t = (it.text or "").strip()
+                        except Exception:
+                            continue
+                        if t and "不显示位置" not in t:
+                            texts.append(t)
+                    return tuple(texts)
+                except Exception:
+                    return tuple()
+
+            baseline_items = _snapshot_items()
+            logger.info(f"位置面板默认列表条数={len(baseline_items)}（用作搜索结果到达的对照）")
+
+            # 3) 注入文本 + 派发完整事件链
             inject_ok = page.run_js(
                 r"""
                 var el = arguments[0];
@@ -728,36 +754,51 @@ class Uploader:
                 logger.warning("位置搜索框无法注入文本")
                 return False
 
-            logger.info(f"已在位置搜索框输入：{label}，等待结果...")
-            self._random_delay(1.2, 1.8)
+            logger.info(f"已在位置搜索框输入：{label}，等待搜索结果...")
 
-            # 3) 在结果列表里挑匹配项：优先包含关键词，找不到再回退首项
-            deadline = time.time() + 8.0
-            while time.time() < deadline:
-                items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
-                fallback = None
-                for item in items:
-                    try:
-                        text = (item.text or "").strip()
-                        if not text or "不显示位置" in text:
-                            continue
-                        if not fallback:
-                            fallback = item
-                        if label in text:
-                            if self._scroll_click_element(page, item):
-                                logger.info(f"已选择位置：{text}")
-                                return True
-                    except Exception:
+            # 4) 等"列表内容相对默认状态发生变化"——这才算搜索请求落地。
+            #    超时（15s）内列表始终没变 → 视为搜索无回应；不点任何项，让外层降级为「不显示位置」。
+            results_arrived = False
+            current_items: tuple[str, ...] = baseline_items
+            results_deadline = time.time() + 15.0
+            while time.time() < results_deadline:
+                current_items = _snapshot_items()
+                if current_items and current_items != baseline_items:
+                    results_arrived = True
+                    break
+                time.sleep(0.3)
+
+            if not results_arrived:
+                logger.warning(
+                    f"位置搜索结果在 15s 内未刷新（仍为默认附近位置 {len(baseline_items)} 条），"
+                    "判定为搜索失败，将由外层降级为「不显示位置」"
+                )
+                return False
+
+            # 给搜索接口的后续分页/补全一点缓冲：极少数情况下结果会分两批渲染
+            self._random_delay(0.4, 0.8)
+
+            # 5) 在新结果列表里严格按关键词匹配，不再 fallback 首项。
+            #    匹配规则：包含完整关键词（最严）→ 找不到就放弃。
+            #    "找不到也要选个"的 fallback 在生产里多次造成选错地址，彻底删掉。
+            final_items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
+            for item in final_items:
+                try:
+                    text = (item.text or "").strip()
+                    if not text or "不显示位置" in text:
                         continue
-                if fallback and self._scroll_click_element(page, fallback):
-                    fb_text = ""
-                    try:
-                        fb_text = (fallback.text or "").strip()
-                    except Exception:
-                        pass
-                    logger.info(f"已选择位置搜索首项：{fb_text or label}")
-                    return True
-                self._random_delay(0.3, 0.6)
+                    if label in text:
+                        if self._scroll_click_element(page, item):
+                            logger.info(f"已选择位置：{text}")
+                            return True
+                except Exception:
+                    continue
+
+            sample = "; ".join(current_items[:5])
+            logger.warning(
+                f"搜索结果已返回但未找到包含关键词「{label}」的位置（当前结果前几条：{sample}），"
+                "将由外层降级为「不显示位置」"
+            )
         except Exception as e:
             logger.warning(f"按名称设置位置失败：{e}")
         return False
@@ -1688,12 +1729,27 @@ class Uploader:
         )
 
     def _load_cookies(self, page: ChromiumPage, cookie_path: str):
-        """加载 Cookie"""
-        with open(cookie_path, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
+        """
+        加载 Cookie。
+
+        文件缺失 / JSON 损坏时不抛出 —— 让上层把任务判为「需要重新登录」类失败，
+        而不是因 IO/解析异常导致整个上传流程崩在底层。
+        """
+        try:
+            with open(cookie_path, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"Cookie 文件不存在: {cookie_path}")
+            cookies = []
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Cookie 文件读取/解析失败 ({cookie_path})：{e}")
+            cookies = []
         page.get(WeixinConfig.CHANNELS_URL)
         for cookie in cookies:
-            page.set.cookies(cookie)
+            try:
+                page.set.cookies(cookie)
+            except Exception as e:
+                logger.warning(f"写入单条 cookie 失败（已跳过）：{e}")
 
     def _save_cookies(self, page: ChromiumPage, cookie_path: str):
         """保存 Cookie"""

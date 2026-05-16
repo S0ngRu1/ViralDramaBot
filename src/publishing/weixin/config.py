@@ -28,7 +28,10 @@ class WeixinConfig:
     PAGE_LOAD_TIMEOUT = 30  # 页面加载超时（秒）
     UPLOAD_TIMEOUT = 600  # 上传超时（秒）
     # 连续上传（如同一批任务）时，上一个视频成功后到开始下一个的间隔（秒）
-    INTER_UPLOAD_COOLDOWN_SEC = max(0, int(os.getenv("WEIXIN_INTER_UPLOAD_COOLDOWN_SEC", "20")))
+    # 实测 20s 在国内本地代理（爱加速/SS 等）刚跑完大流量上传后偏紧 ——
+    # 代理客户端的连接池/TLS 会话尚未回收完，下一个视频加载 channels.weixin.qq.com
+    # 经常以「网络错误」失败。默认 45s 给代理足够喘息时间；环境变量可单独调小。
+    INTER_UPLOAD_COOLDOWN_SEC = max(0, int(os.getenv("WEIXIN_INTER_UPLOAD_COOLDOWN_SEC", "45")))
     OPERATION_DELAY_MIN = 0.5  # 操作间最小延迟（秒）
     OPERATION_DELAY_MAX = 2.0  # 操作间最大延迟（秒）
 

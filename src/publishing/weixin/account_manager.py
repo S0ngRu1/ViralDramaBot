@@ -46,6 +46,18 @@ def get_account_lock(account_id: int) -> threading.Lock:
     return lock
 
 
+def release_account_lock(account_id: int) -> None:
+    """
+    删除账号时调用：把该账号对应的 lock 从字典里摘掉，避免长期运行后字典里残留
+    已删账号的 lock 条目（轻微内存泄漏）。
+
+    被摘掉的 lock 对象若仍被某个线程持有，Python 不会真正回收，等持有方释放后
+    GC 自然清理；这里只是切断「account_id → lock」的索引引用。
+    """
+    with _account_locks_guard:
+        _account_locks.pop(account_id, None)
+
+
 class AccountManager:
     """视频号账号管理器"""
 
@@ -232,7 +244,10 @@ class AccountManager:
 
     def delete_account(self, account_id: int) -> bool:
         """删除账号"""
-        return self.dao.delete_account(account_id)
+        ok = self.dao.delete_account(account_id)
+        if ok:
+            release_account_lock(account_id)
+        return ok
 
     def _wait_for_login(self, page: ChromiumPage, timeout: int = 120) -> dict:
         """
@@ -404,13 +419,28 @@ class AccountManager:
         logger.info(f"Cookie 已保存: {cookie_path}")
 
     def _load_cookies(self, page: ChromiumPage, cookie_path: str):
-        """从文件加载 Cookie"""
-        with open(cookie_path, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
+        """
+        从文件加载 Cookie。
+
+        缺失 / 文件损坏时不抛出，让上层把账号判为「Cookie 失效」走重新登录流程，
+        而不是整个调用栈崩溃。
+        """
+        try:
+            with open(cookie_path, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"Cookie 文件不存在: {cookie_path}")
+            cookies = []
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Cookie 文件读取/解析失败 ({cookie_path})：{e}")
+            cookies = []
         page.get(WeixinConfig.CHANNELS_URL)
         for cookie in cookies:
-            page.set.cookies(cookie)
-        logger.info(f"Cookie 已加载: {cookie_path}")
+            try:
+                page.set.cookies(cookie)
+            except Exception as e:
+                logger.warning(f"写入单条 cookie 失败（已跳过）：{e}")
+        logger.info(f"Cookie 已加载: {cookie_path}（{len(cookies)} 条）")
 
     def _extract_wechat_id(self, page: ChromiumPage) -> Optional[str]:
         """尝试从页面提取微信ID"""
