@@ -6,8 +6,8 @@
     <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <title>视频号上传管理 - ViralDramaBot</title>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="./vendor/vue.global.js"></script>
+    <script src="./vendor/axios.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
@@ -458,7 +458,9 @@
     // 任务的「进行中」状态：上传 / 处理 / 填写 / 发布。这些状态的任务不允许批量删除，
     // 否则会让仍在跑的浏览器自动化任务变成孤儿任务。
     const ACTIVE_TASK_STATUSES = ['uploading', 'processing', 'filling', 'publishing'];
-    const API = 'http://localhost:8000/api/weixin';
+    const API_ROOT = `${window.location.origin}/api`;
+    const API = `${API_ROOT}/weixin`;
+    const getDesktopApi = () => window.pywebview?.api;
 
     createApp({
         setup() {
@@ -629,7 +631,15 @@
                 if (isBrowsingUploadFile.value) return;
                 isBrowsingUploadFile.value = true;
                 try {
-                    const res = await axios.get('http://localhost:8000/api/browse-file');
+                    const desktopApi = getDesktopApi();
+                    if (desktopApi?.browseFile) {
+                        const result = await desktopApi.browseFile();
+                        if (result.status === 'success' && result.path) {
+                            uploadForm.video_path = result.path;
+                        }
+                        return;
+                    }
+                    const res = await axios.get(`${API_ROOT}/browse-file`);
                     if (res.data.status === 'success' && res.data.path) {
                         uploadForm.video_path = res.data.path;
                     }
@@ -641,7 +651,19 @@
                 if (isBrowsingBatchFiles.value) return;
                 isBrowsingBatchFiles.value = true;
                 try {
-                    const res = await axios.get('http://localhost:8000/api/browse-files');
+                    const desktopApi = getDesktopApi();
+                    if (desktopApi?.browseFiles) {
+                        const result = await desktopApi.browseFiles();
+                        if (result.status === 'success' && result.paths) {
+                            for (const p of result.paths) {
+                                if (!batchForm.videoFiles.includes(p)) {
+                                    batchForm.videoFiles.push(p);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    const res = await axios.get(`${API_ROOT}/browse-files`);
                     if (res.data.status === 'success' && res.data.paths) {
                         for (const p of res.data.paths) {
                             if (!batchForm.videoFiles.includes(p)) {

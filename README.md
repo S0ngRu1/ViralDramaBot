@@ -282,7 +282,9 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 build-exe.bat
 ```
 
-产物为 `dist\ViralDramaBot.exe`。入口为 `run_packaged.py`，会打包 `frontend/` 与 `src/`，启动后自动打开浏览器。数据写入 `%APPDATA%\ViralDramaBot`。
+产物为 `dist\ViralDramaBot.exe`。入口为 `run_packaged.py`，会打包 `frontend/` 与 `src/`，启动后以桌面 App 窗口打开，不再弹出终端或自动打开系统浏览器。数据与日志写入 `%APPDATA%\ViralDramaBot`。
+
+如需排查桌面窗口启动问题，可使用 `ViralDramaBot-debug.spec` 构建带控制台的调试版。
 
 ---
 

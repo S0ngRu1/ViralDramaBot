@@ -14,9 +14,11 @@ const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch } 
 // API 客户端
 // ============================================================================
 
-const API_BASE_URL = "http://localhost:8000/api";
+const API_BASE_URL = `${window.location.origin}/api`;
 const DOWNLOAD_SAVE_PATH_KEY = "viraldramabot.download.savePath";
 const MAX_BATCH_ITEMS = 50;
+
+const getDesktopApi = () => window.pywebview?.api;
 
 const api = {
     /**
@@ -116,6 +118,10 @@ const api = {
      */
     browseDirectory: async () => {
         try {
+            const desktopApi = getDesktopApi();
+            if (desktopApi?.browseDirectory) {
+                return await desktopApi.browseDirectory();
+            }
             const response = await axios.get(`${API_BASE_URL}/browse-directory`);
             return response.data;
         } catch (error) {
@@ -128,6 +134,10 @@ const api = {
      */
     browseFiles: async () => {
         try {
+            const desktopApi = getDesktopApi();
+            if (desktopApi?.browseFiles) {
+                return await desktopApi.browseFiles();
+            }
             const response = await axios.get(`${API_BASE_URL}/browse-files`);
             return response.data;
         } catch (error) {

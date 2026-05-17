@@ -7,3 +7,4 @@ pydantic>=2.0.0
 DrissionPage>=4.0.0
 APScheduler>=3.10.0
 PySocks>=1.7.1
+pywebview>=6.2.1,<7

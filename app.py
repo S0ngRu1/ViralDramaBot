@@ -1011,6 +1011,31 @@ async def browse_files() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/browse-file")
+async def browse_file() -> Dict[str, Any]:
+    """打开系统文件选择器，选择单个视频文件。"""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected_file = filedialog.askopenfilename(
+            title="选择视频文件",
+            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
+        )
+        root.destroy()
+
+        if not selected_file:
+            return {"status": "cancelled", "message": "未选择文件"}
+
+        return {"status": "success", "path": selected_file}
+    except Exception as e:
+        logger.error(f"打开文件选择器失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/browse-directory")
 async def browse_directory() -> Dict[str, Any]:
     """打开系统目录选择器并返回用户选择的路径"""
