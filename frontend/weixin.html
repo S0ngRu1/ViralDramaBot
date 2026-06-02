@@ -120,6 +120,7 @@
                     <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
                     <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
                     <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
+                    <div :class="['tab', { active: tab === 'lowtraffic' }]" @click="tab = 'lowtraffic'; loadLowTrafficTab()">低流量清理</div>
                 </div>
 
                 <!-- 账号管理 -->
@@ -431,6 +432,84 @@
                         <div v-else class="empty-state">暂无定时计划</div>
                     </div>
                 </div>
+
+                <!-- 低流量清理 -->
+                <div v-if="tab === 'lowtraffic'">
+                    <div class="alert alert-error" style="margin-bottom: 16px;">
+                        启用后将在后台自动删除视频号平台上「发表超过观察期且播放量低于阈值」的视频，<strong>不可恢复</strong>，请谨慎设置。
+                    </div>
+                    <div class="card">
+                        <h3>清理规则</h3>
+                        <div class="form-group">
+                            <label>选择账号</label>
+                            <select v-model="lowTrafficForm.account_id" @change="loadLowTrafficRule">
+                                <option value="">请选择账号</option>
+                                <option v-for="acc in accounts" :key="acc.id" :value="acc.id">
+                                    {{ acc.name }} ({{ getStatusText(acc.status) }})
+                                </option>
+                            </select>
+                        </div>
+                        <template v-if="lowTrafficForm.account_id">
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" v-model="lowTrafficForm.enabled" style="width: auto; margin-right: 8px;">
+                                    启用自动清理
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label>观察期（发表后多少天再检测）</label>
+                                <input type="number" v-model.number="lowTrafficForm.grace_days" min="1" max="365" step="1">
+                                <p style="color: #999; font-size: 12px; margin-top: 4px;">保存时转换为 {{ lowTrafficForm.grace_days * 24 }} 小时</p>
+                            </div>
+                            <div class="form-group">
+                                <label>最低播放量（低于该值则删除）</label>
+                                <input type="number" v-model.number="lowTrafficForm.min_views" min="0" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label>后台检测间隔（分钟）</label>
+                                <input type="number" v-model.number="lowTrafficForm.check_interval_minutes" min="5" max="1440" step="5">
+                            </div>
+                            <div class="flex gap-2">
+                                <button class="btn btn-primary" @click="saveLowTrafficRule" :disabled="lowTrafficSaving">保存规则</button>
+                                <button class="btn btn-danger" @click="runLowTrafficNow" :disabled="lowTrafficRunning || !lowTrafficForm.enabled">
+                                    <span v-if="lowTrafficRunning"><span class="spinner"></span> 检测中…</span>
+                                    <span v-else>立即检测</span>
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="card">
+                        <div class="flex justify-between items-center" style="margin-bottom: 16px;">
+                            <h3>删稿记录</h3>
+                            <button class="btn btn-sm" @click="loadLowTrafficLogs">刷新</button>
+                        </div>
+                        <table class="table" v-if="lowTrafficLogs.length">
+                            <thead>
+                                <tr>
+                                    <th>时间</th>
+                                    <th>账号</th>
+                                    <th>标题</th>
+                                    <th>播放量</th>
+                                    <th>结果</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="log in lowTrafficLogs" :key="log.id">
+                                    <td>{{ formatDate(log.created_at) }}</td>
+                                    <td>{{ getAccountName(log.account_id) }}</td>
+                                    <td>{{ (log.title || log.post_id || '-').slice(0, 40) }}</td>
+                                    <td>{{ log.view_count != null ? log.view_count : '-' }}</td>
+                                    <td>
+                                        <span :class="'badge badge-' + (log.action === 'deleted' ? 'completed' : 'failed')">
+                                            {{ log.action === 'deleted' ? '已删除' : '失败' }}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div v-else class="empty-state">暂无删稿记录</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -487,6 +566,16 @@
                 account_id: '', video_paths: '', schedule_type: 'interval',
                 interval_minutes: 60, cron_expr: '', tagsStr: '', metadata_source: 'manual'
             });
+            const lowTrafficForm = reactive({
+                account_id: '',
+                enabled: false,
+                grace_days: 3,
+                min_views: 100,
+                check_interval_minutes: 60,
+            });
+            const lowTrafficLogs = ref([]);
+            const lowTrafficSaving = ref(false);
+            const lowTrafficRunning = ref(false);
 
             function showMessage(text, type = 'info') {
                 message.show = true; message.type = type; message.text = text;
@@ -763,12 +852,79 @@
                 } catch (e) { showMessage('删除失败', 'error'); }
             }
 
+            async function loadLowTrafficRule() {
+                const id = lowTrafficForm.account_id;
+                if (!id) return;
+                try {
+                    const res = await axios.get(`${API}/accounts/${id}/low-traffic-rule`);
+                    const rule = res.data.rule || {};
+                    lowTrafficForm.enabled = !!rule.enabled;
+                    lowTrafficForm.grace_days = Math.max(1, Math.round((rule.grace_period_hours || 72) / 24));
+                    lowTrafficForm.min_views = rule.min_views ?? 100;
+                    lowTrafficForm.check_interval_minutes = rule.check_interval_minutes ?? 60;
+                } catch (e) {
+                    showMessage('加载规则失败: ' + (e.response?.data?.detail || e.message), 'error');
+                }
+            }
+
+            async function loadLowTrafficLogs() {
+                try {
+                    const params = {};
+                    if (lowTrafficForm.account_id) params.account_id = lowTrafficForm.account_id;
+                    const res = await axios.get(`${API}/low-traffic/logs`, { params });
+                    lowTrafficLogs.value = res.data.logs || [];
+                } catch (e) { console.error(e); }
+            }
+
+            async function loadLowTrafficTab() {
+                await loadAccounts();
+                await loadLowTrafficLogs();
+                if (lowTrafficForm.account_id) await loadLowTrafficRule();
+            }
+
+            async function saveLowTrafficRule() {
+                const id = lowTrafficForm.account_id;
+                if (!id) { showMessage('请选择账号', 'error'); return; }
+                if (!confirm('保存后若已启用，符合条件的视频将被自动删除，确定保存？')) return;
+                lowTrafficSaving.value = true;
+                try {
+                    await axios.put(`${API}/accounts/${id}/low-traffic-rule`, {
+                        enabled: lowTrafficForm.enabled,
+                        grace_period_hours: Math.max(1, lowTrafficForm.grace_days * 24),
+                        min_views: lowTrafficForm.min_views,
+                        check_interval_minutes: lowTrafficForm.check_interval_minutes,
+                    });
+                    showMessage('规则已保存', 'success');
+                } catch (e) {
+                    showMessage('保存失败: ' + (e.response?.data?.detail || e.message), 'error');
+                } finally { lowTrafficSaving.value = false; }
+            }
+
+            async function runLowTrafficNow() {
+                const id = lowTrafficForm.account_id;
+                if (!id) return;
+                if (!confirm('立即在后台检测并删除低流量视频，确定继续？')) return;
+                lowTrafficRunning.value = true;
+                try {
+                    await axios.post(`${API}/accounts/${id}/low-traffic/run`);
+                    showMessage('检测已在后台启动，请稍后刷新删稿记录', 'info');
+                    setTimeout(async () => {
+                        await loadLowTrafficLogs();
+                        lowTrafficRunning.value = false;
+                    }, 8000);
+                } catch (e) {
+                    showMessage('启动失败: ' + (e.response?.data?.detail || e.message), 'error');
+                    lowTrafficRunning.value = false;
+                }
+            }
+
             onMounted(() => { loadAccounts(); loadSchedules(); });
 
             return {
                 tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, message, refreshingIds,
                 isBrowsingUploadFile, isBrowsingBatchFiles,
-                uploadForm, batchForm, scheduleForm,
+                uploadForm, batchForm, scheduleForm, lowTrafficForm, lowTrafficLogs,
+                lowTrafficSaving, lowTrafficRunning,
                 formatDate, getFileName, getAccountName,
                 getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
                 isTaskActive, selectableTaskIds, isAllSelectableSelected, isPartiallySelected,
@@ -779,6 +935,8 @@
                 createUploadTask, createBatchUpload,
                 retryTask, deleteTask,
                 createSchedule, deleteSchedule,
+                loadLowTrafficTab, loadLowTrafficRule, loadLowTrafficLogs,
+                saveLowTrafficRule, runLowTrafficNow,
             };
         }
     }).mount('#app');
