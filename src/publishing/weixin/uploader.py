@@ -206,7 +206,9 @@ class Uploader:
             self._wait_for_upload_complete(page)
 
             self.dao.update_task_status(task_id, TaskStatus.FILLING)
-            self._fill_metadata(page, metadata, drama_link)
+            drama_link_ok = self._fill_metadata(page, metadata, drama_link)
+            if drama_link and not drama_link_ok:
+                raise Exception(f"剧集链接「{drama_link}」挂载失败，中断上传")
 
             # 位置策略（新规则，简化为两条）：
             #   1) 用户在批量上传里填了「发表位置」 → 在视频号位置面板按该关键词搜索并选中；
@@ -361,10 +363,13 @@ class Uploader:
 
         raise Exception(f"视频上传超时（{WeixinConfig.UPLOAD_TIMEOUT}秒）")
 
-    def _fill_metadata(self, page: ChromiumPage, metadata: VideoMetadata, drama_link: Optional[str] = None):
+    def _fill_metadata(self, page: ChromiumPage, metadata: VideoMetadata, drama_link: Optional[str] = None) -> bool:
         """填写描述 + 剧集链接 + （可选）短标题。
 
         标签写入已下线：`metadata.tags` 即便有值也不会再拼进描述、也不会再点 #话题 添加。
+
+        Returns:
+            bool: 当 drama_link 有值时，返回剧集挂载是否成功；无 drama_link 时返回 True。
         """
         logger.info("正在填写视频信息...")
 
@@ -373,14 +378,16 @@ class Uploader:
             self._fill_description(page, description)
             self._random_delay(0.5, 1)
 
+        drama_link_ok = True
         if drama_link:
-            self._add_drama_link(page, drama_link)
+            drama_link_ok = self._add_drama_link(page, drama_link)
             self._random_delay(0.5, 1)
 
         if metadata.title:
             self._fill_short_title(page, metadata.title)
 
         self._random_delay(0.5, 1)
+        return drama_link_ok
 
     def _fill_description(self, page: ChromiumPage, description: str):
         """
@@ -1579,8 +1586,12 @@ class Uploader:
         logger.warning(f"剧集列表未出现可点击行: {query or '(关键词为空)'}")
         return False
 
-    def _add_drama_link(self, page: ChromiumPage, drama_name: str):
-        """添加视频号剧集链接：选「视频号剧集」→ 点「选择需要关联/添加的视频号剧集」→ 在「搜索内容」中搜索并选择。"""
+    def _add_drama_link(self, page: ChromiumPage, drama_name: str) -> bool:
+        """添加视频号剧集链接：选「视频号剧集」→ 点「选择需要关联/添加的视频号剧集」→ 在「搜索内容」中搜索并选择。
+
+        Returns:
+            bool: 挂载成功返回 True，失败返回 False。
+        """
         try:
             logger.info(f"正在添加剧集链接: {drama_name}")
 
@@ -1590,11 +1601,11 @@ class Uploader:
 
             if not link_wrap:
                 logger.warning("未找到链接区域")
-                return
+                return False
 
             if not self._scroll_click_element(page, link_wrap):
                 logger.warning("点击链接区域失败")
-                return
+                return False
 
             self._random_delay(0.8, 1.3)
 
@@ -1626,11 +1637,11 @@ class Uploader:
 
                 if not drama_option:
                     logger.warning("未找到「视频号剧集」选项（已跳过小程序短剧）")
-                    return
+                    return False
 
                 if not self._scroll_click_element(page, drama_option):
                     logger.warning("选择「视频号剧集」失败")
-                    return
+                    return False
 
             self._random_delay(0.6, 1)
 
@@ -1673,15 +1684,17 @@ class Uploader:
                 logger.info("未找到「选择需要添加的视频号剧集」，尝试在当前层搜索")
 
             if not self._search_and_select_native_drama(page, drama_name):
-                return
+                return False
 
             logger.info(f"剧集链接流程已完成: {drama_name or '(首条结果)'}")
+            return True
 
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ("disconnected", "target closed", "浏览器已关闭", "session", "connection refused")):
                 raise
             logger.warning(f"添加剧集链接失败: {e}")
+            return False
 
     def _set_schedule_time(self, page: ChromiumPage, scheduled_at: datetime):
         """设置定时发布时间"""
