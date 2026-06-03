@@ -33,9 +33,13 @@ python app.py
 start-web.bat
 ```
 
-### 打包版
+### 打包版（桌面应用）
 
-运行 `dist\ViralDramaBot.exe` 后，数据目录为 `%APPDATA%\ViralDramaBot`，行为与开发版一致。
+**推荐：** 运行安装包 `ViralDramaBot-Setup.exe`（由 `build-installer.bat` 生成），按向导安装并勾选「创建桌面快捷方式」，之后从桌面或开始菜单启动。安装到 `C:\Program Files` 等目录需同意 UAC；也可选择「仅为当前用户安装」到用户目录（无需管理员）。
+
+**开发自测：** 直接运行 `dist\ViralDramaBot\ViralDramaBot.exe`（需保持同目录依赖文件完整）。
+
+无论哪种方式，用户数据与日志目录均为 `%APPDATA%\ViralDramaBot`，行为与开发版一致。卸载程序不会删除该目录下的数据。
 
 ---
 

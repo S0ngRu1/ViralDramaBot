@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 
 from contextlib import asynccontextmanager
 
@@ -92,10 +92,13 @@ else:
     DATA_DIR = project_root / ".data"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+# 打包/桌面版在 import 微信等模块前写入 WORK_DIR，避免落到 ~/.viraldramabot_data
+os.environ["WORK_DIR"] = str(DATA_DIR)
 
 # 数据目录路径
 VIDEO_METADATA_DIR = DATA_DIR / "metadata"
 VIDEO_INDEX_DB_PATH = VIDEO_METADATA_DIR / "video_index.db"
+SETTINGS_FILE_PATH = DATA_DIR / "settings.json"
 INDEX_REPAIR_INTERVAL_SECONDS = 300
 MAX_TASKS_PER_BATCH = 50
 DEFAULT_MAX_CONCURRENT = 6
@@ -104,17 +107,90 @@ DEFAULT_MAX_CONCURRENT = 6
 # 初始化
 # ============================================================================
 from src.core import initialize_app, config, logger
-# 初始化应用
-initialize_app()
 config.update(work_dir=str(DATA_DIR))
+initialize_app()
+
+def _load_persisted_settings() -> None:
+    """从磁盘加载上次保存的设置，覆盖默认值。"""
+    import json
+    if not SETTINGS_FILE_PATH.exists():
+        return
+    try:
+        with open(SETTINGS_FILE_PATH, "r", encoding="utf-8") as f:
+            saved: dict = json.load(f)
+        if saved:
+            config.update(**{k: v for k, v in saved.items() if k in {
+                "work_dir", "download_timeout", "max_retries",
+                "weixin_upload_timeout", "weixin_inter_upload_cooldown",
+                "weixin_max_retries", "weixin_proxy_enabled",
+                "weixin_proxy_scheme", "weixin_proxy_host",
+                "weixin_proxy_port", "weixin_location_mode",
+            }})
+            logger.info("✅ 已加载持久化设置: video_dir=%s", config.work_dir)
+    except Exception as exc:
+        logger.warning("⚠️ 加载持久化设置失败（将使用默认值）: %s", exc)
+
+_load_persisted_settings()
+
+
+def _migrate_legacy_weixin_accounts() -> None:
+    """将旧路径 ~/.viraldramabot_data/weixin/weixin.db 的账号一次性迁移到当前数据目录。"""
+    import shutil as _shutil
+    old_db = Path.home() / ".viraldramabot_data" / "weixin" / "weixin.db"
+    if not old_db.exists():
+        return
+    from src.publishing.weixin.config import WeixinConfig as _WC
+    new_db = Path(_WC.DB_PATH)
+    new_cookies = Path(_WC.COOKIES_DIR)
+    if not new_db.exists():
+        return
+    try:
+        old = sqlite3.connect(old_db)
+        old.row_factory = sqlite3.Row
+        new = sqlite3.connect(new_db)
+        new.row_factory = sqlite3.Row
+        old_accounts = old.execute("SELECT * FROM accounts").fetchall()
+        migrated = 0
+        for acc in old_accounts:
+            a = dict(acc)
+            if new.execute("SELECT id FROM accounts WHERE name=?", (a["name"],)).fetchone():
+                continue
+            old_cookie = Path(a["cookie_path"]) if a.get("cookie_path") else None
+            new_cookie_path = None
+            if old_cookie and old_cookie.exists():
+                dest = new_cookies / old_cookie.name
+                new_cookies.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(old_cookie, dest)
+                new_cookie_path = str(dest)
+            new.execute(
+                "INSERT INTO accounts (name, wechat_id, status, cookie_path, created_at, last_login_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (a["name"], a.get("wechat_id"), a["status"],
+                 new_cookie_path, a["created_at"], a.get("last_login_at")),
+            )
+            migrated += 1
+        new.commit()
+        old.close()
+        new.close()
+        if migrated:
+            logger.info("✅ 自动迁移旧账号 %d 个（来自 %s）", migrated, old_db.parent)
+    except Exception as exc:
+        logger.warning("⚠️ 旧账号迁移失败（不影响运行）: %s", exc)
+
+
+_migrate_legacy_weixin_accounts()
+
 
 # 创建 FastAPI 应用
 @asynccontextmanager
 async def lifespan(app):
     """应用生命周期管理：启动时初始化索引，关闭时清理后台任务"""
     global repair_task
+    # 同步建表（快，必须在第一个请求前完成）
     ensure_video_index_storage()
-    repair_missing_video_entries()
+    # 耗时的文件扫描和索引修复放到后台线程，不阻塞事件循环
+    asyncio.create_task(asyncio.to_thread(repair_missing_video_entries))
+    asyncio.create_task(asyncio.to_thread(scan_and_import_videos, config.work_path))
     if repair_task is None or repair_task.done():
         repair_task = asyncio.create_task(periodic_index_repair())
     # 同步视频号配置到 WeixinConfig
@@ -132,9 +208,14 @@ async def lifespan(app):
     weixin_cookie_checker.start()
     # 启动批量上传串行队列
     batch_upload_queue.start()
-    # 启动后即在后台跑一次全量账号刷新，让前端看到的状态最新；
-    # 不阻塞 lifespan，前端通过 /accounts/refresh-status 轮询进度。
-    run_refresh_all_accounts(weixin_account_mgr)
+    # 启动后延迟刷新账号，避免与桌面窗口启动争抢 CPU/磁盘（多个 headless Edge）。
+    # 不阻塞 lifespan；前端通过 /accounts/refresh-status 轮询进度。
+    delay_sec = max(0, int(os.getenv("WEIXIN_STARTUP_REFRESH_DELAY_SEC", "20")))
+    if delay_sec <= 0:
+        run_refresh_all_accounts(weixin_account_mgr)
+    else:
+        Timer(delay_sec, run_refresh_all_accounts, args=(weixin_account_mgr,)).start()
+        logger.info("视频号账号状态将在 %s 秒后后台刷新", delay_sec)
     yield
     if repair_task and not repair_task.done():
         repair_task.cancel()
@@ -452,6 +533,46 @@ def repair_missing_video_entries() -> int:
         logger.info(f"🧹 后台修复索引完成，已移除 {len(removed_ids)} 条失效记录")
 
     return len(removed_ids)
+
+
+def save_settings_to_disk(settings_dict: dict) -> None:
+    """将当前设置持久化到磁盘，下次启动时自动恢复。"""
+    import json
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_FILE_PATH, "w", encoding="utf-8") as f:
+            json.dump(settings_dict, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning("⚠️ 持久化设置失败: %s", exc)
+
+
+def scan_and_import_videos(directory: Path) -> int:
+    """扫描目录中未被索引的 .mp4 文件并导入数据库。"""
+    import hashlib
+    if not directory.is_dir():
+        return 0
+    ensure_video_index_storage()
+    with get_index_connection() as conn:
+        existing_paths = {
+            row[0] for row in conn.execute("SELECT file_path FROM videos").fetchall()
+        }
+    imported = 0
+    for mp4_file in sorted(directory.glob("*.mp4")):
+        if str(mp4_file) in existing_paths:
+            continue
+        try:
+            video_id = hashlib.sha256(str(mp4_file).encode()).hexdigest()[:20]
+            upsert_video_index_entry(
+                video_id=video_id,
+                file_path=str(mp4_file),
+                title=mp4_file.stem,
+            )
+            imported += 1
+        except Exception as exc:
+            logger.warning("⚠️ 导入视频文件失败 %s: %s", mp4_file, exc)
+    if imported:
+        logger.info("✅ 自动导入 %d 个视频文件（来自 %s）", imported, directory)
+    return imported
 
 
 def build_progress(
@@ -1070,6 +1191,19 @@ async def browse_directory() -> Dict[str, Any]:
         )
 
 
+# ---- 视频目录重新扫描 ----
+
+@app.post("/api/videos/rescan")
+async def rescan_video_dir() -> Dict[str, Any]:
+    """扫描当前视频保存目录，将未被索引的 .mp4 文件导入数据库。"""
+    try:
+        imported = scan_and_import_videos(config.work_path)
+        return {"status": "success", "imported": imported, "directory": str(config.work_path)}
+    except Exception as e:
+        logger.error(f"❌ 重新扫描目录失败: {e}")
+        raise HTTPException(status_code=500, detail=f"扫描失败: {e}")
+
+
 # ---- 应用设置 ----
 
 @app.get("/api/settings")
@@ -1154,6 +1288,7 @@ async def update_settings(settings: AppSettings) -> Dict[str, Any]:
             download_timeout=settings.download_timeout,
             max_retries=settings.max_retries
         )
+        save_settings_to_disk(updated_settings)
 
         # 同步视频号配置到 WeixinConfig
         WeixinConfig.UPLOAD_TIMEOUT = config.weixin_upload_timeout
@@ -1748,6 +1883,12 @@ async def weixin_delete_schedule(schedule_id: int) -> Dict[str, Any]:
 
 
 # ---- 系统信息 ----
+
+@app.get("/api/health")
+async def health_check() -> Dict[str, str]:
+    """轻量探活，供桌面版启动时检测服务是否就绪（不访问数据库）。"""
+    return {"status": "ok"}
+
 
 @app.get("/api/status")
 async def get_status() -> Dict[str, Any]:
