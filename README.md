@@ -143,7 +143,12 @@ ViralDramaBot/
 ├── cli.py                              # CLI 命令行入口
 ├── run_packaged.py                     # PyInstaller 打包入口
 ├── ViralDramaBot.spec                  # PyInstaller 配置
-├── build-exe.bat                       # Windows 一键打包脚本
+├── build-exe.bat                       # Windows onedir 打包脚本
+├── build-installer.bat                 # onedir + Inno Setup 安装包
+├── installer/
+│   ├── ViralDramaBot.iss               # Inno Setup 安装向导配置
+│   └── languages/
+│       └── ChineseSimplified.isl       # 安装向导简体中文（社区翻译）
 ├── frontend/
 │   ├── index.html                      # SPA 入口（下载/管理/视频号/设置）
 │   ├── weixin.html                     # 视频号独立页（精简版）
@@ -278,11 +283,28 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 
 ## 打包为 Windows 可执行文件
 
+### 给最终用户（推荐）：安装包
+
+1. 构建机安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)（将 `ISCC.exe` 加入 PATH，或使用默认安装路径）。
+2. 在项目根目录执行：
+
+```bash
+build-installer.bat
+```
+
+3. 分发产物：**`dist\installer\ViralDramaBot-Setup.exe`**
+
+用户双击安装包后，会弹出 UAC 授权（安装到 `Program Files` 等系统目录需要管理员权限）。可按向导选择安装目录、勾选「创建桌面快捷方式」；若不想提权，可在安装模式中选择「仅为当前用户安装」，默认目录会落到 `%LOCALAPPDATA%\Programs\ViralDramaBot`。安装完成后从桌面或开始菜单启动。卸载：Windows「设置 → 应用」中卸载 ViralDramaBot（**不会**删除 `%APPDATA%\ViralDramaBot` 中的用户数据与日志）。
+
+### 开发自测：仅 onedir 目录
+
 ```bash
 build-exe.bat
 ```
 
-产物为 `dist\ViralDramaBot.exe`。入口为 `run_packaged.py`，会打包 `frontend/` 与 `src/`，启动后以桌面 App 窗口打开，不再弹出终端或自动打开系统浏览器。数据与日志写入 `%APPDATA%\ViralDramaBot`。
+产物为 **`dist\ViralDramaBot\` 整个文件夹**（onedir，启动时无需再把单文件解压到 `%TEMP%`）。请运行其中的 `ViralDramaBot.exe`；若手动拷贝分发，需带上同目录下全部依赖文件。需要安装向导时请改用 `build-installer.bat`。
+
+入口为 `run_packaged.py`，会打包 `frontend/` 与 `src/`，启动后以桌面 App 窗口打开，不再弹出终端或自动打开系统浏览器。数据与日志写入 `%APPDATA%\ViralDramaBot`。
 
 如需排查桌面窗口启动问题，可使用 `ViralDramaBot-debug.spec` 构建带控制台的调试版。
 

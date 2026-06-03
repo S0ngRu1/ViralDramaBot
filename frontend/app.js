@@ -442,6 +442,13 @@ const api = {
 
 const app = createApp({
     template: `
+        <transition name="fade">
+            <div v-if="loading" class="app-loading-overlay">
+                <img src="./logo.png" alt="" class="app-loading-logo">
+                <div class="app-loading-spinner"></div>
+                <p class="app-loading-text">正在加载中，请稍候…</p>
+            </div>
+        </transition>
         <div class="container">
             <!-- 侧边栏 -->
             <div class="sidebar">
@@ -523,6 +530,7 @@ const app = createApp({
     `,
 
     setup() {
+        const loading = ref(true);
         const currentPage = ref('download');
         const videos = ref([]);
         const settings = ref({
@@ -592,13 +600,17 @@ const app = createApp({
             }
         };
 
-        // 页面加载时初始化
-        onMounted(() => {
-            loadVideos();
-            loadSettings();
+        // 页面加载时初始化，两个请求都完成后移除遮罩
+        onMounted(async () => {
+            try {
+                await Promise.all([loadVideos(), loadSettings()]);
+            } finally {
+                loading.value = false;
+            }
         });
 
         return {
+            loading,
             currentPage,
             videos,
             settings,
