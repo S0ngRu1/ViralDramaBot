@@ -24,6 +24,7 @@ class BatchJob:
     job_id: int
     label: str
     runner: Callable[[], None]
+    account_id: Optional[int] = None
     submitted_at: datetime = field(default_factory=datetime.now)
 
 
@@ -67,7 +68,12 @@ class BatchUploadQueue:
             self._worker.join(timeout=2)
             self._worker = None
 
-    def submit(self, runner: Callable[[], None], label: str = "") -> dict:
+    def submit(
+        self,
+        runner: Callable[[], None],
+        label: str = "",
+        account_id: Optional[int] = None,
+    ) -> dict:
         """
         入队一次批量上传任务。
 
@@ -82,7 +88,12 @@ class BatchUploadQueue:
         with self._lock:
             job_id = self._next_job_id
             self._next_job_id += 1
-        job = BatchJob(job_id=job_id, label=label or f"batch#{job_id}", runner=runner)
+        job = BatchJob(
+            job_id=job_id,
+            label=label or f"batch#{job_id}",
+            runner=runner,
+            account_id=account_id,
+        )
         self._queue.put(job)
         position = self._queue.qsize()
         logger.info(
@@ -101,6 +112,7 @@ class BatchUploadQueue:
                 {
                     "job_id": self._current_job.job_id,
                     "label": self._current_job.label,
+                    "account_id": self._current_job.account_id,
                     "started_at": self._current_job.submitted_at.isoformat(),
                 }
                 if self._current_job
@@ -110,6 +122,14 @@ class BatchUploadQueue:
             "current": current,
             "pending": self._queue.qsize(),
         }
+
+    def is_account_busy(self, account_id: int) -> bool:
+        """该账号是否有批量上传正在执行或排队（仅当前执行项可精确匹配账号）"""
+        with self._state_lock:
+            job = self._current_job
+            if job and job.account_id == account_id:
+                return True
+        return False
 
     def _run(self) -> None:
         while True:

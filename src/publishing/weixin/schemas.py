@@ -164,3 +164,36 @@ class QRCodeResponse(BaseModel):
     qrcode_base64: Optional[str] = None
     status: str
     message: str
+
+
+class LowTrafficRuleUpdate(BaseModel):
+    """更新低流量清理规则"""
+    enabled: bool = Field(False, description="是否启用自动清理")
+    grace_period_hours: int = Field(72, ge=1, le=24 * 365, description="发表后观察期（小时）")
+    min_views: int = Field(100, ge=0, description="播放量低于该值则删除")
+    check_interval_minutes: int = Field(60, ge=5, le=24 * 60, description="检测间隔（分钟）")
+
+
+class LowTrafficRuleInfo(BaseModel):
+    """低流量清理规则"""
+    account_id: int
+    enabled: bool
+    grace_period_hours: int
+    min_views: int
+    check_interval_minutes: int
+    updated_at: Optional[datetime] = None
+
+
+class LowTrafficCleanupLogInfo(BaseModel):
+    """低流量删稿日志"""
+    id: int
+    account_id: int
+    post_id: str
+    title: Optional[str] = None
+    published_at: Optional[datetime] = None
+    view_count: Optional[int] = None
+    grace_period_hours: int
+    min_views: int
+    action: str
+    error_msg: Optional[str] = None
+    created_at: datetime

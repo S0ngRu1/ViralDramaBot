@@ -107,6 +107,36 @@ class WeixinDAO:
                 CREATE INDEX IF NOT EXISTS idx_tasks_account ON upload_tasks(account_id);
                 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
                 CREATE INDEX IF NOT EXISTS idx_proxy_profiles_enabled ON proxy_profiles(enabled, id);
+
+                CREATE TABLE IF NOT EXISTS low_traffic_rules (
+                    account_id INTEGER PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    grace_period_hours INTEGER NOT NULL DEFAULT 72,
+                    min_views INTEGER NOT NULL DEFAULT 100,
+                    check_interval_minutes INTEGER NOT NULL DEFAULT 60,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS low_traffic_cleanup_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    post_id TEXT NOT NULL,
+                    title TEXT,
+                    published_at TEXT,
+                    view_count INTEGER,
+                    grace_period_hours INTEGER NOT NULL,
+                    min_views INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    error_msg TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (account_id) REFERENCES accounts(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_cleanup_logs_account
+                    ON low_traffic_cleanup_logs(account_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_low_traffic_enabled
+                    ON low_traffic_rules(enabled);
             """)
             # 轻量迁移：老库的 upload_tasks 缺少代理审计列，需要补齐。
             # SQLite 没有「ADD COLUMN IF NOT EXISTS」语法，所以先看 PRAGMA 再决定。
@@ -180,6 +210,7 @@ class WeixinDAO:
             Path(cookie_path).unlink(missing_ok=True)
         with self._get_conn() as conn:
             conn.execute("DELETE FROM upload_tasks WHERE account_id = ?", (account_id,))
+            self.delete_account_low_traffic_data(account_id)
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         return True
 
@@ -584,3 +615,136 @@ class WeixinDAO:
         with self._get_conn() as conn:
             cursor = conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             return cursor.rowcount > 0
+
+    # ==================== 低流量清理 ====================
+
+    def get_low_traffic_rule(self, account_id: int) -> dict:
+        """获取账号低流量规则；不存在则返回默认（未启用）"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM low_traffic_rules WHERE account_id = ?", (account_id,)
+            ).fetchone()
+            if row:
+                d = dict(row)
+                d["enabled"] = bool(d.get("enabled"))
+                return d
+        return {
+            "account_id": account_id,
+            "enabled": False,
+            "grace_period_hours": 72,
+            "min_views": 100,
+            "check_interval_minutes": 60,
+            "updated_at": None,
+        }
+
+    def upsert_low_traffic_rule(
+        self,
+        account_id: int,
+        enabled: bool,
+        grace_period_hours: int,
+        min_views: int,
+        check_interval_minutes: int,
+    ) -> dict:
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO low_traffic_rules
+                (account_id, enabled, grace_period_hours, min_views, check_interval_minutes, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                    enabled = excluded.enabled,
+                    grace_period_hours = excluded.grace_period_hours,
+                    min_views = excluded.min_views,
+                    check_interval_minutes = excluded.check_interval_minutes,
+                    updated_at = excluded.updated_at""",
+                (
+                    account_id,
+                    1 if enabled else 0,
+                    grace_period_hours,
+                    min_views,
+                    check_interval_minutes,
+                    now,
+                ),
+            )
+        return self.get_low_traffic_rule(account_id)
+
+    def list_enabled_low_traffic_rules(self) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM low_traffic_rules WHERE enabled = 1"
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                d["enabled"] = bool(d.get("enabled"))
+                result.append(d)
+            return result
+
+    def add_cleanup_log(
+        self,
+        account_id: int,
+        post_id: str,
+        title: Optional[str],
+        published_at: Optional[str],
+        view_count: Optional[int],
+        grace_period_hours: int,
+        min_views: int,
+        action: str,
+        error_msg: Optional[str] = None,
+    ) -> int:
+        now = datetime.now().isoformat()
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """INSERT INTO low_traffic_cleanup_logs
+                (account_id, post_id, title, published_at, view_count,
+                 grace_period_hours, min_views, action, error_msg, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    post_id,
+                    title,
+                    published_at,
+                    view_count,
+                    grace_period_hours,
+                    min_views,
+                    action,
+                    error_msg,
+                    now,
+                ),
+            )
+            return cursor.lastrowid
+
+    def is_post_already_deleted(self, account_id: int, post_id: str) -> bool:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM low_traffic_cleanup_logs
+                WHERE account_id = ? AND post_id = ? AND action = 'deleted' LIMIT 1""",
+                (account_id, post_id),
+            ).fetchone()
+            return row is not None
+
+    def list_cleanup_logs(
+        self,
+        account_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        query = "SELECT * FROM low_traffic_cleanup_logs WHERE 1=1"
+        params: list = []
+        if account_id is not None:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_account_low_traffic_data(self, account_id: int) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM low_traffic_rules WHERE account_id = ?", (account_id,)
+            )
+            conn.execute(
+                "DELETE FROM low_traffic_cleanup_logs WHERE account_id = ?",
+                (account_id,),
+            )

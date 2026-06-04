@@ -606,6 +606,13 @@ CREATE INDEX idx_accounts_status ON accounts(status);
 - `run_refresh_all_accounts()` 在后台线程执行，不阻塞启动
 - 前端通过 `GET /api/weixin/accounts/refresh-status` 轮询进度
 
+### 6. 低流量视频清理（`LowTrafficScheduler` + `LowTrafficCleaner`）
+
+- 轮询间隔：每 5 分钟 tick 一次；各账号按规则中的 `check_interval_minutes` 决定是否执行
+- 功能：拉取创作者中心已发列表（`post_list` CGI），删除「发表超过观察期且播放量低于阈值」的视频
+- 与上传互斥：账号锁 + 跳过有进行中上传/批量上传的账号
+- 数据表：`low_traffic_rules`、`low_traffic_cleanup_logs`
+
 ---
 
 ## 命名规则

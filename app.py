@@ -81,7 +81,10 @@ from src.publishing.weixin.schemas import (
     MetadataSource, TaskBatchDeleteRequest,
     ProxyProfileCreate, ProxyProfileUpdate,
     FavoriteLocationCreate,
+    LowTrafficRuleUpdate,
 )
+from src.publishing.weixin.low_traffic_cleaner import LowTrafficCleaner
+from src.publishing.weixin.low_traffic_scheduler import LowTrafficScheduler
 
 # ===== 新增：数据目录自动适配 =====
 if getattr(sys, 'frozen', False):
@@ -206,6 +209,8 @@ async def lifespan(app):
     weixin_scheduler.start()
     # 启动 Cookie 后台轮询（每小时检查一次）
     weixin_cookie_checker.start()
+    # 启动低流量视频清理调度
+    weixin_low_traffic_scheduler.start()
     # 启动批量上传串行队列
     batch_upload_queue.start()
     # 启动后延迟刷新账号，避免与桌面窗口启动争抢 CPU/磁盘（多个 headless Edge）。
@@ -227,6 +232,8 @@ async def lifespan(app):
     batch_upload_queue.stop()
     # 停止 Cookie 轮询
     weixin_cookie_checker.stop()
+    # 停止低流量清理调度
+    weixin_low_traffic_scheduler.stop()
     # 停止视频号调度器
     weixin_scheduler.stop()
 
@@ -355,6 +362,8 @@ weixin_account_mgr = AccountManager(weixin_dao)
 weixin_uploader = Uploader(weixin_dao)
 weixin_scheduler = UploadScheduler(weixin_dao)
 weixin_cookie_checker = CookieChecker(weixin_account_mgr)
+weixin_low_traffic_cleaner = LowTrafficCleaner(weixin_dao, weixin_account_mgr)
+weixin_low_traffic_scheduler = LowTrafficScheduler(weixin_dao, weixin_low_traffic_cleaner)
 
 
 # ============================================================================
@@ -1685,6 +1694,7 @@ async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
         enqueue_info = batch_upload_queue.submit(
             do_batch_upload,
             label=f"account#{account_id} x{len(task_ids)}",
+            account_id=account_id,
         )
 
         position = enqueue_info["queue_position"]
@@ -1864,6 +1874,60 @@ async def weixin_get_schedules() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"获取定时计划失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/accounts/{account_id}/low-traffic-rule")
+async def weixin_get_low_traffic_rule(account_id: int) -> Dict[str, Any]:
+    """获取账号低流量自动删稿规则"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    rule = weixin_dao.get_low_traffic_rule(account_id)
+    return {"status": "success", "rule": rule}
+
+
+@app.put("/api/weixin/accounts/{account_id}/low-traffic-rule")
+async def weixin_put_low_traffic_rule(
+    account_id: int, body: LowTrafficRuleUpdate
+) -> Dict[str, Any]:
+    """更新账号低流量自动删稿规则"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    rule = weixin_dao.upsert_low_traffic_rule(
+        account_id=account_id,
+        enabled=body.enabled,
+        grace_period_hours=body.grace_period_hours,
+        min_views=body.min_views,
+        check_interval_minutes=body.check_interval_minutes,
+    )
+    return {"status": "success", "rule": rule}
+
+
+@app.get("/api/weixin/low-traffic/logs")
+async def weixin_low_traffic_logs(
+    account_id: Optional[int] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    """低流量删稿历史"""
+    logs = weixin_dao.list_cleanup_logs(account_id=account_id, limit=min(limit, 500))
+    return {"status": "success", "logs": logs, "total": len(logs)}
+
+
+@app.post("/api/weixin/accounts/{account_id}/low-traffic/run")
+async def weixin_low_traffic_run(
+    account_id: int, background_tasks: BackgroundTasks
+) -> Dict[str, Any]:
+    """手动触发一轮低流量检测（后台执行）"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    def _run():
+        weixin_low_traffic_cleaner.run_for_account(account_id)
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "低流量检测已在后台启动"}
 
 
 @app.delete("/api/weixin/schedule/{schedule_id}")

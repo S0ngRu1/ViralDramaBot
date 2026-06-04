@@ -13,6 +13,7 @@
 - **定时发布**：支持 Cron 表达式或间隔分钟
 - **剧集关联**：支持关联视频号剧集
 - **Cookie 轮询**：每小时检查一次 Cookie 有效性
+- **低流量自动删稿**：按账号配置观察期与播放量阈值，后台定时检测并在平台上删除低播放视频
 - **浏览器池**：管理并发浏览器实例，避免资源争抢
 
 ---
@@ -32,7 +33,12 @@ src/publishing/weixin/
 ├── metadata.py                 # 标题/描述/标签解析
 ├── proxy.py                    # 代理连通性与出口 IP
 ├── geocoding.py                # IP 归属地
-└── batch_queue.py              # 多批 upload/batch 的全局串行队列
+├── batch_queue.py              # 多批 upload/batch 的全局串行队列
+├── channel_post.py             # 已发视频内存模型
+├── post_list.py                # 拉取已发列表与播放量
+├── post_delete.py              # 平台删稿
+├── low_traffic_cleaner.py      # 低流量检测与删稿编排
+└── low_traffic_scheduler.py    # 低流量清理定时调度
 ```
 
 ---
@@ -233,6 +239,17 @@ POST   /api/weixin/schedule
 GET    /api/weixin/schedule
 DELETE /api/weixin/schedule/{schedule_id}
 ```
+
+### 低流量自动删稿
+
+```
+GET    /api/weixin/accounts/{account_id}/low-traffic-rule
+PUT    /api/weixin/accounts/{account_id}/low-traffic-rule
+GET    /api/weixin/low-traffic/logs?account_id=&limit=
+POST   /api/weixin/accounts/{account_id}/low-traffic/run   # 手动触发一轮
+```
+
+规则字段：`enabled`、`grace_period_hours`（观察期）、`min_views`（播放量阈值）、`check_interval_minutes`（检测间隔）。
 
 ---
 
