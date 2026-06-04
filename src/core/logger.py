@@ -1,103 +1,110 @@
 """
 日志系统模块
 
-提供统一的日志输出功能，支持多个日志级别：
-- INFO: 信息级别
-- WARN: 警告级别
-- ERROR: 错误级别
-- DEBUG: 调试级别（仅在 DEBUG 环境变量设置时输出）
+支持多个日志级别，并维护一个进程内的环形缓冲区（最多 500 条），
+可通过 get_log_entries() 读取供前端实时展示。
 """
 
-import os
+import collections
+import threading
 from datetime import datetime
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 from enum import Enum
 
 
 class LogLevel(Enum):
-    """日志级别枚举"""
     DEBUG = "DEBUG"
     INFO = "INFO"
     WARN = "WARN"
     ERROR = "ERROR"
 
 
+# ── 全局日志缓冲区 ────────────────────────────────────────────────────────────
+_log_buffer: collections.deque = collections.deque(maxlen=500)
+_log_lock = threading.Lock()
+_log_seq = [0]  # 单调递增序号，用列表以便在内层函数中修改
+
+
+def get_log_entries(since_id: int = 0, limit: int = 100) -> List[Dict]:
+    """返回 id > since_id 的最新 limit 条日志（线程安全）。"""
+    with _log_lock:
+        entries = [e for e in _log_buffer if e["id"] > since_id]
+    return entries[-limit:]
+
+
 class Logger:
-    """日志记录器类"""
-    
+    """日志记录器"""
+
     def __init__(self, debug_mode: bool = False):
-        """
-        初始化日志记录器
-        
-        Args:
-            debug_mode: 是否启用调试模式
-        """
+        import os
         self.debug_mode = debug_mode or os.getenv('DEBUG') is not None
-    
+
     @staticmethod
     def _format_message(level: LogLevel, message: str, context: Optional[Any] = None) -> str:
-        """
-        格式化日志消息
-        
-        Args:
-            level: 日志级别
-            message: 日志消息
-            context: 上下文信息（可选）
-        
-        Returns:
-            格式化后的日志消息
-        """
         timestamp = datetime.now().isoformat()
         context_str = f" [{context}]" if context else ""
         return f"[{timestamp}] [{level.value}] {message}{context_str}"
-    
-    def info(self, message: str, context: Optional[Any] = None) -> None:
-        """
-        输出信息级别日志
-        
-        Args:
-            message: 日志消息
-            context: 上下文信息（可选）
-        """
-        formatted = self._format_message(LogLevel.INFO, message, context)
-        print(formatted)
-    
-    def warn(self, message: str, context: Optional[Any] = None) -> None:
-        """
-        输出警告级别日志
 
-        Args:
-            message: 日志消息
-            context: 上下文信息（可选）
-        """
-        formatted = self._format_message(LogLevel.WARN, message, context)
+    def _emit(self, level: LogLevel, message: str, context: Optional[Any] = None) -> None:
+        import logging as _logging
+        context_str = f" [{context}]" if context else ""
+        full_msg = message + context_str
+        formatted = f"[{datetime.now().isoformat()}] [{level.value}] {full_msg}"
         print(formatted)
+        # 同时写入标准 logging，确保打包版（stdout→devnull）也能在 app.log 里看到上传日志
+        _std_level = {
+            LogLevel.DEBUG: _logging.DEBUG,
+            LogLevel.INFO:  _logging.INFO,
+            LogLevel.WARN:  _logging.WARNING,
+            LogLevel.ERROR: _logging.ERROR,
+        }.get(level, _logging.INFO)
+        _logging.getLogger("ViralDramaBot.app").log(_std_level, full_msg)
+        # 写入环形缓冲区
+        ts = datetime.now().strftime("%H:%M:%S")
+        with _log_lock:
+            _log_seq[0] += 1
+            _log_buffer.append({
+                "id": _log_seq[0],
+                "level": level.value,
+                "msg": full_msg,
+                "ts": ts,
+            })
 
-    # warning 是 warn 的别名，兼容 Python 标准 logging 命名
+    def info(self, message: str, *args, context: Optional[Any] = None) -> None:
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        self._emit(LogLevel.INFO, message, context)
+
+    def warn(self, message: str, *args, context: Optional[Any] = None) -> None:
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        self._emit(LogLevel.WARN, message, context)
+
     warning = warn
-    
-    def error(self, message: str, context: Optional[Any] = None) -> None:
-        """
-        输出错误级别日志
-        
-        Args:
-            message: 日志消息
-            context: 上下文信息（可选）
-        """
-        formatted = self._format_message(LogLevel.ERROR, message, context)
-        print(formatted)
-    
-    def debug(self, message: str, context: Optional[Any] = None) -> None:
-        """
-        输出调试级别日志（仅在调试模式下输出）
-        
-        Args:
-            message: 日志消息
-            context: 上下文信息（可选）
-        """
-        if self.debug_mode:
-            formatted = self._format_message(LogLevel.DEBUG, message, context)
-            print(formatted)
+
+    def error(self, message: str, *args, context: Optional[Any] = None) -> None:
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        self._emit(LogLevel.ERROR, message, context)
+
+    def debug(self, message: str, *args, context: Optional[Any] = None) -> None:
+        if not self.debug_mode:
+            return
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        self._emit(LogLevel.DEBUG, message, context)
 
 
 # 全局日志实例

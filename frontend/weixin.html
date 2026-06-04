@@ -85,6 +85,22 @@
 
         .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #ccc; border-top-color: #1890ff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* 日志面板 */
+        .log-panel { background: #111827; border-radius: 6px; padding: 12px 14px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; height: 520px; overflow-y: auto; line-height: 1.6; }
+        .log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+        .log-ts { color: #6b7280; margin-right: 6px; user-select: none; }
+        .log-INFO  { color: #d1d5db; }
+        .log-WARN  { color: #fbbf24; }
+        .log-ERROR { color: #f87171; }
+        .log-DEBUG { color: #6b7280; }
+        .log-badge { display: inline-block; font-size: 10px; padding: 0 4px; border-radius: 3px; margin-right: 6px; font-weight: 600; user-select: none; }
+        .log-INFO  .log-badge { background: #1e40af33; color: #60a5fa; }
+        .log-WARN  .log-badge { background: #92400e33; color: #fbbf24; }
+        .log-ERROR .log-badge { background: #7f1d1d33; color: #f87171; }
+        .log-DEBUG .log-badge { background: #1f2937;   color: #6b7280; }
+        .log-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .log-toolbar .log-count { color: #6b7280; font-size: 12px; flex: 1; }
     </style>
 </head>
 <body>
@@ -120,6 +136,7 @@
                     <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
                     <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
                     <div :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'">定时发布</div>
+                    <div :class="['tab', { active: tab === 'logs' }]" @click="tab = 'logs'; startLogPolling()">运行日志</div>
                 </div>
 
                 <!-- 账号管理 -->
@@ -276,6 +293,10 @@
                             <textarea v-model="batchForm.descriptionStr" placeholder="填写后每个任务都会带上该描述；留空则仅按「元数据来源」自动填充描述" rows="3"></textarea>
                         </div>
                         <div class="form-group">
+                            <label>挂载剧集名称（可选）</label>
+                            <input v-model="batchForm.dramaLink" placeholder="填写视频号剧集名称，留空则不挂载">
+                        </div>
+                        <div class="form-group">
                             <label>元数据来源</label>
                             <select v-model="batchForm.metadata_source">
                                 <option value="manual">手动填写</option>
@@ -355,6 +376,31 @@
                             </tbody>
                         </table>
                         <div v-else class="empty-state">暂无上传任务</div>
+                    </div>
+                </div>
+
+                <!-- 运行日志 -->
+                <div v-if="tab === 'logs'">
+                    <div class="card">
+                        <div class="log-toolbar">
+                            <span class="log-count">共 {{ logEntries.length }} 条</span>
+                            <label style="font-size:12px; color:#666; display:flex; align-items:center; gap:4px;">
+                                <input type="checkbox" v-model="logAutoScroll"> 自动滚动
+                            </label>
+                            <button class="btn btn-sm" @click="clearLogs()">清空</button>
+                            <button class="btn btn-sm" @click="fetchLogs()">刷新</button>
+                        </div>
+                        <div class="log-panel" id="log-panel">
+                            <div v-if="!logEntries.length" style="color:#4b5563; text-align:center; padding-top:200px;">暂无日志</div>
+                            <div
+                                v-for="e in logEntries"
+                                :key="e.id"
+                                :class="['log-line', 'log-' + e.level]"
+                            >
+                                <span class="log-ts">{{ e.ts }}</span>
+                                <span class="log-badge">{{ e.level }}</span>{{ e.msg }}
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -454,7 +500,7 @@
     </div>
 
     <script>
-    const { createApp, ref, reactive, computed, onMounted } = Vue;
+    const { createApp, ref, reactive, computed, onMounted, watch, nextTick } = Vue;
     // 任务的「进行中」状态：上传 / 处理 / 填写 / 发布。这些状态的任务不允许批量删除，
     // 否则会让仍在跑的浏览器自动化任务变成孤儿任务。
     const ACTIVE_TASK_STATUSES = ['uploading', 'processing', 'filling', 'publishing'];
@@ -481,12 +527,59 @@
                 tagsStr: '', metadata_source: 'manual', scheduled_at: ''
             });
             const batchForm = reactive({
-                account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual'
+                account_id: '', videoFiles: [], tagsStr: '', descriptionStr: '', metadata_source: 'manual', dramaLink: ''
             });
             const scheduleForm = reactive({
                 account_id: '', video_paths: '', schedule_type: 'interval',
                 interval_minutes: 60, cron_expr: '', tagsStr: '', metadata_source: 'manual'
             });
+
+            // ── 运行日志 ─────────────────────────────────────────────────────────
+            const logEntries = ref([]);
+            const logSinceId = ref(0);
+            const logAutoScroll = ref(true);
+            let _logTimer = null;
+
+            async function fetchLogs() {
+                try {
+                    const res = await axios.get(`${API_ROOT}/logs`, {
+                        params: { since: logSinceId.value, limit: 100 }
+                    });
+                    const newEntries = res.data.entries || [];
+                    if (newEntries.length) {
+                        logEntries.value.push(...newEntries);
+                        if (logEntries.value.length > 500) {
+                            logEntries.value.splice(0, logEntries.value.length - 500);
+                        }
+                        logSinceId.value = newEntries[newEntries.length - 1].id;
+                        if (logAutoScroll.value) {
+                            await nextTick();
+                            const panel = document.getElementById('log-panel');
+                            if (panel) panel.scrollTop = panel.scrollHeight;
+                        }
+                    }
+                } catch (e) { /* 静默忽略轮询失败 */ }
+            }
+
+            function startLogPolling() {
+                fetchLogs();
+                if (_logTimer) return;
+                _logTimer = setInterval(fetchLogs, 2000);
+            }
+
+            function stopLogPolling() {
+                if (_logTimer) { clearInterval(_logTimer); _logTimer = null; }
+            }
+
+            function clearLogs() {
+                logEntries.value = [];
+            }
+
+            watch(tab, (val) => {
+                if (val === 'logs') startLogPolling();
+                else stopLogPolling();
+            });
+            // ─────────────────────────────────────────────────────────────────────
 
             function showMessage(text, type = 'info') {
                 message.show = true; message.type = type; message.text = text;
@@ -711,9 +804,10 @@
                         descriptions,
                         tags: tags.length ? tags : null,
                         metadata_source: batchForm.metadata_source,
+                        drama_link: batchForm.dramaLink.trim() || null,
                     });
                     showMessage(`批量任务已创建，共 ${res.data.total} 个`, 'success');
-                    batchForm.videoFiles = []; batchForm.tagsStr = ''; batchForm.descriptionStr = '';
+                    batchForm.videoFiles = []; batchForm.tagsStr = ''; batchForm.descriptionStr = ''; batchForm.dramaLink = '';
                 } catch (e) { showMessage('创建失败: ' + (e.response?.data?.detail || e.message), 'error'); }
             }
 
@@ -779,6 +873,8 @@
                 createUploadTask, createBatchUpload,
                 retryTask, deleteTask,
                 createSchedule, deleteSchedule,
+                // 日志
+                logEntries, logAutoScroll, fetchLogs, startLogPolling, clearLogs,
             };
         }
     }).mount('#app');
