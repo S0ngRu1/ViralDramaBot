@@ -408,6 +408,15 @@ const api = {
         }
     },
 
+    getLogs: async (since = 0, limit = 200) => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/logs`, { params: { since, limit } });
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     getWeixinSchedules: async () => {
         try {
             const response = await axios.get(`${API_BASE_URL}/weixin/schedule`);
@@ -489,6 +498,14 @@ const app = createApp({
                             ⚙️ 应用设置
                         </a>
                     </li>
+                    <li>
+                        <a
+                            :class="{ active: currentPage === 'logs' }"
+                            @click="currentPage = 'logs'"
+                        >
+                            📋 运行日志
+                        </a>
+                    </li>
                 </ul>
             </div>
 
@@ -524,6 +541,11 @@ const app = createApp({
                 <!-- 微信视频号上传页面 -->
                 <div v-if="currentPage === 'weixin'">
                     <weixin-page :api="api" />
+                </div>
+
+                <!-- 运行日志页面 -->
+                <div v-if="currentPage === 'logs'">
+                    <logs-page :api="api" />
                 </div>
             </div>
         </div>
@@ -1477,7 +1499,7 @@ app.component('settings-page', {
                     <div class="col">
                         <div>
                             <strong>版本:</strong><br/>
-                            0.1.0
+                            1.0.0
                         </div>
                     </div>
                 </div>
@@ -2738,6 +2760,157 @@ app.component('weixin-page', {
             createBatchUpload,
             retryTask, deleteTask,
             createSchedule, deleteSchedule, showMessage
+        };
+    }
+});
+
+// ============================================================================
+// 运行日志页面组件
+// ============================================================================
+
+app.component('logs-page', {
+    props: ['api'],
+    template: `
+        <div>
+            <div class="header">
+                <h1>📋 运行日志</h1>
+                <p>实时展示应用运行日志，最多保留最新 500 条（进程内缓冲区，重启后清空）</p>
+            </div>
+
+            <div class="card">
+                <div class="log-toolbar">
+                    <select v-model="levelFilter" style="width: auto; min-width: 110px;">
+                        <option value="">全部级别</option>
+                        <option value="INFO">INFO</option>
+                        <option value="WARN">WARN</option>
+                        <option value="ERROR">ERROR</option>
+                        <option value="DEBUG">DEBUG</option>
+                    </select>
+                    <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;">
+                        <input type="checkbox" v-model="autoRefresh" />
+                        自动刷新
+                    </label>
+                    <button class="btn btn-secondary btn-small" @click="fetchLogs" :disabled="loading">
+                        {{ loading ? '加载中…' : '🔄 手动刷新' }}
+                    </button>
+                    <button class="btn btn-secondary btn-small" @click="scrollToBottom" title="滚动到底部">⬇ 最新</button>
+                    <button class="btn btn-secondary btn-small" @click="clearView" title="清空当前视图（不影响后端日志）">🗑 清空视图</button>
+                    <span style="margin-left:auto; color: var(--text-light); font-size:12px;">
+                        共 {{ filteredEntries.length }} 条
+                        <span v-if="levelFilter">（已过滤 {{ levelFilter }}）</span>
+                    </span>
+                </div>
+
+                <div class="log-viewer" ref="viewerRef">
+                    <div
+                        v-for="entry in filteredEntries"
+                        :key="entry.id"
+                        class="log-entry"
+                    >
+                        <span class="log-ts">{{ entry.ts }}</span>
+                        <span :class="'log-level log-level-' + entry.level">{{ entry.level }}</span>
+                        <span :class="'log-msg log-msg-' + entry.level">{{ entry.msg }}</span>
+                    </div>
+                    <div v-if="filteredEntries.length === 0" style="color:#6b6050; padding:8px 0;">
+                        {{ levelFilter ? '没有匹配 ' + levelFilter + ' 级别的日志' : '暂无日志' }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `,
+
+    setup(props) {
+        const entries = ref([]);
+        const levelFilter = ref('');
+        const autoRefresh = ref(true);
+        const loading = ref(false);
+        const viewerRef = ref(null);
+        let maxSeenId = 0;
+        let timer = null;
+        let userScrolledUp = false;
+
+        const filteredEntries = computed(() => {
+            if (!levelFilter.value) return entries.value;
+            return entries.value.filter(e => e.level === levelFilter.value);
+        });
+
+        const isNearBottom = () => {
+            const el = viewerRef.value;
+            if (!el) return true;
+            return el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        };
+
+        const scrollToBottom = () => {
+            const el = viewerRef.value;
+            if (el) el.scrollTop = el.scrollHeight;
+        };
+
+        const fetchLogs = async () => {
+            loading.value = true;
+            try {
+                const result = await props.api.getLogs(maxSeenId, 200);
+                const newEntries = result.entries || [];
+                if (newEntries.length > 0) {
+                    const shouldScroll = !userScrolledUp && isNearBottom();
+                    entries.value = [...entries.value, ...newEntries].slice(-500);
+                    maxSeenId = newEntries[newEntries.length - 1].id;
+                    if (shouldScroll) {
+                        await Vue.nextTick();
+                        scrollToBottom();
+                    }
+                }
+            } catch (e) {
+                console.error('获取日志失败', e);
+            } finally {
+                loading.value = false;
+            }
+        };
+
+        const clearView = () => {
+            entries.value = [];
+            maxSeenId = 0;
+        };
+
+        const startPolling = () => {
+            stopPolling();
+            timer = setInterval(fetchLogs, 2000);
+        };
+
+        const stopPolling = () => {
+            if (timer) { clearInterval(timer); timer = null; }
+        };
+
+        watch(autoRefresh, (val) => {
+            val ? startPolling() : stopPolling();
+        });
+
+        onMounted(async () => {
+            await fetchLogs();
+            scrollToBottom();
+            if (autoRefresh.value) startPolling();
+
+            const el = viewerRef.value;
+            if (el) {
+                el.addEventListener('scroll', () => {
+                    userScrolledUp = !isNearBottom();
+                });
+            }
+        });
+
+        onBeforeUnmount(() => {
+            stopPolling();
+        });
+
+        return {
+            entries,
+            levelFilter,
+            autoRefresh,
+            loading,
+            viewerRef,
+            filteredEntries,
+            fetchLogs,
+            clearView,
+            scrollToBottom
         };
     }
 });

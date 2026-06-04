@@ -22,6 +22,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'wx', 'gi', 'cefpython3',
+        'tkinter', '_tkinter', 'tcl', 'tk',
         'numpy', 'scipy', 'pandas', 'matplotlib',
         'sklearn', 'skimage', 'cv2',
         'boto3', 'botocore', 's3transfer', 'aiobotocore',

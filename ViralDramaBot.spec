@@ -23,6 +23,7 @@ a = Analysis(
     excludes=[
         # GUI 框架（pywebview 用 WebView2，不需要这些）
         'PyQt5', 'PyQt6', 'PySide2', 'PySide6', 'wx', 'gi', 'cefpython3',
+        'tkinter', '_tkinter', 'tcl', 'tk',
         # 科学计算（未使用，但被间接依赖带入）
         'numpy', 'scipy', 'pandas', 'matplotlib',
         'sklearn', 'skimage', 'cv2',

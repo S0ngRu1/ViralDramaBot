@@ -18,7 +18,7 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
 
 setup(
     name="ViralDramaBot",
-    version="0.1.0",
+    version="1.0.0",
     author="Your Name",
     author_email="your-email@example.com",
     description="一站式短剧自动化流水线：从资源采集、智能剪辑到多平台矩阵发布的全链路解决方案",
