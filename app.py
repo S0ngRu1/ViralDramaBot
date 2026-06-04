@@ -88,8 +88,11 @@ if getattr(sys, 'frozen', False):
     # 打包后 → 使用系统 AppData 目录（对用户不可见）
     DATA_DIR = Path(os.getenv("APPDATA")) / "ViralDramaBot"
 else:
-    # 开发环境 → 仍然使用项目根目录下的 .data
-    DATA_DIR = project_root / ".data"
+    # 开发环境 → 默认项目根目录下的 .data；
+    # 但允许通过 WORK_DIR 环境变量覆盖（例如 start-web.bat 指向 %APPDATA%\ViralDramaBot，
+    # 使开发启动与打包版桌面软件共用同一份账号/数据库）
+    _env_work_dir = os.getenv("WORK_DIR")
+    DATA_DIR = Path(_env_work_dir) if _env_work_dir else (project_root / ".data")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 # 打包/桌面版在 import 微信等模块前写入 WORK_DIR，避免落到 ~/.viraldramabot_data
@@ -233,7 +236,7 @@ async def lifespan(app):
 app = FastAPI(
     title="ViralDramaBot",
     description="短剧自动化流水线 - Web 版本",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan
 )
 
@@ -1107,26 +1110,127 @@ async def get_download_progress() -> Dict[str, Any]:
     )
 
 
+def _win_file_dialog(title: str, multi: bool = True) -> list:
+    """使用 Windows 原生 GetOpenFileNameW，不依赖 tkinter。"""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    OFN_EXPLORER         = 0x00080000
+    OFN_FILEMUSTEXIST    = 0x00001000
+    OFN_PATHMUSTEXIST    = 0x00000800
+    OFN_HIDEREADONLY     = 0x00000004
+    OFN_ALLOWMULTISELECT = 0x00000200
+
+    class OFN(ctypes.Structure):
+        _fields_ = [
+            ("lStructSize",       wt.DWORD),
+            ("hwndOwner",         wt.HWND),
+            ("hInstance",         ctypes.c_void_p),
+            ("lpstrFilter",       ctypes.c_wchar_p),
+            ("lpstrCustomFilter", ctypes.c_wchar_p),
+            ("nMaxCustFilter",    wt.DWORD),
+            ("nFilterIndex",      wt.DWORD),
+            ("lpstrFile",         ctypes.c_wchar_p),
+            ("nMaxFile",          wt.DWORD),
+            ("lpstrFileTitle",    ctypes.c_wchar_p),
+            ("nMaxFileTitle",     wt.DWORD),
+            ("lpstrInitialDir",   ctypes.c_wchar_p),
+            ("lpstrTitle",        ctypes.c_wchar_p),
+            ("Flags",             wt.DWORD),
+            ("nFileOffset",       wt.WORD),
+            ("nFileExtension",    wt.WORD),
+            ("lpstrDefExt",       ctypes.c_wchar_p),
+            ("lCustData",         ctypes.c_ssize_t),
+            ("lpfnHook",          ctypes.c_void_p),
+            ("lpTemplateName",    ctypes.c_wchar_p),
+            ("pvReserved",        ctypes.c_void_p),
+            ("dwReserved",        wt.DWORD),
+            ("FlagsEx",           wt.DWORD),
+        ]
+
+    BUF_SIZE = 65536
+    buf = ctypes.create_unicode_buffer(BUF_SIZE)
+
+    ofn = OFN()
+    ofn.lStructSize  = ctypes.sizeof(OFN)
+    ofn.lpstrFilter  = "视频文件\0*.mp4;*.avi;*.mov;*.mkv;*.flv;*.wmv\0所有文件\0*.*\0\0"
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile    = buf
+    ofn.nMaxFile     = BUF_SIZE
+    ofn.lpstrTitle   = title
+    ofn.Flags        = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
+    if multi:
+        ofn.Flags |= OFN_ALLOWMULTISELECT
+
+    if not ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        return []
+
+    # 缓冲区格式：单文件=完整路径\0；多文件=目录\0文件名1\0文件名2\0\0
+    parts = []
+    cur = []
+    for i in range(BUF_SIZE):
+        ch = buf[i]
+        if ch == "\x00":
+            if cur:
+                parts.append("".join(cur))
+                cur = []
+            elif parts:
+                break
+        else:
+            cur.append(ch)
+
+    if not parts:
+        return []
+    if len(parts) == 1:
+        return parts
+    return [str(Path(parts[0]) / f) for f in parts[1:]]
+
+
+def _win_dir_dialog(title: str) -> str:
+    """使用 Windows 原生 SHBrowseForFolderW，不依赖 tkinter。"""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    BIF_RETURNONLYFSDIRS = 0x0001
+    BIF_NEWDIALOGSTYLE   = 0x0040
+    BIF_EDITBOX          = 0x0010
+
+    class BROWSEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner",      wt.HWND),
+            ("pidlRoot",       ctypes.c_void_p),
+            ("pszDisplayName", ctypes.c_wchar_p),
+            ("lpszTitle",      ctypes.c_wchar_p),
+            ("ulFlags",        wt.UINT),
+            ("lpfn",           ctypes.c_void_p),
+            ("lParam",         ctypes.c_ssize_t),
+            ("iImage",         ctypes.c_int),
+        ]
+
+    disp = ctypes.create_unicode_buffer(260)
+    bi = BROWSEINFOW()
+    bi.pszDisplayName = disp
+    bi.lpszTitle      = title
+    bi.ulFlags        = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
+
+    pidl = ctypes.windll.shell32.SHBrowseForFolderW(ctypes.byref(bi))
+    if not pidl:
+        return ""
+
+    path_buf = ctypes.create_unicode_buffer(260)
+    ctypes.windll.shell32.SHGetPathFromIDListW(pidl, path_buf)
+    ctypes.windll.ole32.CoTaskMemFree(pidl)
+    return path_buf.value or ""
+
+
 @app.get("/api/browse-files")
 async def browse_files() -> Dict[str, Any]:
     """打开系统文件选择器（多个视频文件）"""
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected_files = filedialog.askopenfilenames(
-            title="选择视频文件（可多选）",
-            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
-        )
-        root.destroy()
-
-        if not selected_files:
+        paths = _win_file_dialog("选择视频文件（可多选）", multi=True)
+        if not paths:
             return {"status": "cancelled", "message": "未选择文件"}
-
-        return {"status": "success", "paths": list(selected_files)}
+        return {"status": "success", "paths": paths}
     except Exception as e:
         logger.error(f"❌ 打开文件选择器失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1136,22 +1240,10 @@ async def browse_files() -> Dict[str, Any]:
 async def browse_file() -> Dict[str, Any]:
     """打开系统文件选择器，选择单个视频文件。"""
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected_file = filedialog.askopenfilename(
-            title="选择视频文件",
-            filetypes=[("视频文件", "*.mp4 *.avi *.mov *.mkv *.flv *.wmv"), ("所有文件", "*.*")]
-        )
-        root.destroy()
-
-        if not selected_file:
+        paths = _win_file_dialog("选择视频文件", multi=False)
+        if not paths:
             return {"status": "cancelled", "message": "未选择文件"}
-
-        return {"status": "success", "path": selected_file}
+        return {"status": "success", "path": paths[0]}
     except Exception as e:
         logger.error(f"打开文件选择器失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1161,34 +1253,13 @@ async def browse_file() -> Dict[str, Any]:
 async def browse_directory() -> Dict[str, Any]:
     """打开系统目录选择器并返回用户选择的路径"""
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        selected_dir = filedialog.askdirectory(
-            initialdir=str(Path(config.work_dir).resolve()),
-            title="选择视频保存目录"
-        )
-        root.destroy()
-
+        selected_dir = _win_dir_dialog("选择视频保存目录")
         if not selected_dir:
-            return {
-                "status": "cancelled",
-                "message": "未选择目录"
-            }
-
-        return {
-            "status": "success",
-            "path": selected_dir
-        }
+            return {"status": "cancelled", "message": "未选择目录"}
+        return {"status": "success", "path": selected_dir}
     except Exception as e:
         logger.error(f"❌ 打开目录选择器失败: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"打开目录选择器失败: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"打开目录选择器失败: {str(e)}")
 
 
 # ---- 视频目录重新扫描 ----
@@ -1633,6 +1704,7 @@ async def weixin_batch_upload(request: BatchUploadCreate) -> Dict[str, Any]:
                 metadata_source=request.metadata_source.value,
                 proxy_profile_id=request.proxy_profile_id,
                 location_label=(request.location_label or "").strip() or None,
+                drama_link=request.drama_link,
             )
             task_ids.append(task_id)
 
@@ -1802,6 +1874,7 @@ async def weixin_retry_task(task_id: int, background_tasks: BackgroundTasks) -> 
                 metadata_source=task.get("metadata_source", "manual"),
                 proxy_profile_id=task.get("proxy_profile_id"),
                 location_label=task.get("location_label"),
+                drama_link=task.get("drama_link"),
             )
 
         background_tasks.add_task(do_retry)
@@ -1907,7 +1980,7 @@ async def get_status() -> Dict[str, Any]:
         {
             "status": "success",
             "app_name": "ViralDramaBot",
-            "version": "0.1.0",
+            "version": "1.0.0",
             "video_count": 5
         }
     """
@@ -1916,7 +1989,7 @@ async def get_status() -> Dict[str, Any]:
         return {
             "status": "success",
             "app_name": "ViralDramaBot",
-            "version": "0.1.0",
+            "version": "1.0.0",
             "video_count": len(videos)
         }
     except Exception as e:

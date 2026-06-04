@@ -12,7 +12,7 @@ ViralDramaBot - 短剧自动化流水线
 - src/utils/: 通用工具模块
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 from . import core
 from . import ingestion

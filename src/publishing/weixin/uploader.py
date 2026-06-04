@@ -227,6 +227,11 @@ class Uploader:
                 self._set_location_hidden(page)
             self._random_delay(0.5, 1)
 
+            # 位置设置完成后再次确认剧集链接。以链接区域里真实挂载的剧集名为准，
+            # 防止“弹层搜索框未定位到”一类中间状态把已挂载的剧集误判为失败。
+            if drama_link and not self._wait_for_expected_drama_mounted(page, drama_link):
+                raise Exception(f"剧集链接「{drama_link}」挂载失败（位置设置后页面未找到剧名），中断上传")
+
             if scheduled_at:
                 self._set_schedule_time(page, scheduled_at)
 
@@ -807,74 +812,113 @@ class Uploader:
             baseline_items = _snapshot_items()
             logger.info(f"位置面板默认列表条数={len(baseline_items)}（用作搜索结果到达的对照）")
 
-            # 3) 注入文本 + 派发完整事件链
-            inject_ok = page.run_js(
-                r"""
-                var el = arguments[0];
-                var keyword = String(arguments[1] == null ? '' : arguments[1]);
-                if (!el) return false;
-                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                el.focus();
-                setter.call(el, '');
-                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
-                setter.call(el, keyword);
-                el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: keyword}));
-                el.dispatchEvent(new Event('change', {bubbles: true}));
-                el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13}));
-                var btn = document.querySelector('.location-filter-wrap .weui-desktop-search__btn');
-                if (btn) btn.click();
-                return true;
-                """,
-                search_input,
-                label,
-            )
-            if not inject_ok:
-                logger.warning("位置搜索框无法注入文本")
-                return False
+            # 3) 注入文本 + 派发完整事件链。封装成函数，便于 #4 未刷新时重试。
+            def _inject_keyword() -> bool:
+                return bool(page.run_js(
+                    r"""
+                    var el = arguments[0];
+                    var keyword = String(arguments[1] == null ? '' : arguments[1]);
+                    if (!el) return false;
+                    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    el.focus();
+                    setter.call(el, '');
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
+                    setter.call(el, keyword);
+                    el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: keyword}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13}));
+                    var btn = document.querySelector('.location-filter-wrap .weui-desktop-search__btn');
+                    if (btn) btn.click();
+                    return true;
+                    """,
+                    search_input,
+                    label,
+                ))
 
-            logger.info(f"已在位置搜索框输入：{label}，等待搜索结果...")
-
-            # 4) 等"列表内容相对默认状态发生变化"——这才算搜索请求落地。
-            #    超时（15s）内列表始终没变 → 视为搜索无回应；不点任何项，让外层降级为「不显示位置」。
+            # 4) 注入后等"列表内容相对默认状态发生变化"才算搜索请求落地。
+            #    搜索接口受代理抖动 / 事件未触发搜索 / 偶发限流影响可能不回数据，
+            #    因此未刷新时重新注入并再等一轮，最多 3 次；全部失败才让外层降级为「不显示位置」。
             results_arrived = False
             current_items: tuple[str, ...] = baseline_items
-            results_deadline = time.time() + 15.0
-            while time.time() < results_deadline:
-                current_items = _snapshot_items()
-                if current_items and current_items != baseline_items:
-                    results_arrived = True
+            max_attempts = 3
+            per_attempt_wait = 8.0
+            for attempt in range(1, max_attempts + 1):
+                if not _inject_keyword():
+                    logger.warning(
+                        f"位置搜索框无法注入文本（第 {attempt}/{max_attempts} 次）"
+                    )
+                    self._random_delay(0.5, 1.0)
+                    continue
+
+                logger.info(
+                    f"已在位置搜索框输入：{label}，等待搜索结果...（第 {attempt}/{max_attempts} 次）"
+                )
+                attempt_deadline = time.time() + per_attempt_wait
+                while time.time() < attempt_deadline:
+                    current_items = _snapshot_items()
+                    if current_items and current_items != baseline_items:
+                        results_arrived = True
+                        break
+                    time.sleep(0.3)
+
+                if results_arrived:
                     break
-                time.sleep(0.3)
+                logger.warning(
+                    f"位置搜索结果在 {per_attempt_wait:.0f}s 内未刷新"
+                    f"（第 {attempt}/{max_attempts} 次，仍为默认附近位置 {len(baseline_items)} 条），"
+                    "准备重试" if attempt < max_attempts else
+                    f"位置搜索结果在 {per_attempt_wait:.0f}s 内未刷新"
+                    f"（第 {attempt}/{max_attempts} 次），重试已用尽"
+                )
+                self._random_delay(0.5, 1.0)
 
             if not results_arrived:
                 logger.warning(
-                    f"位置搜索结果在 15s 内未刷新（仍为默认附近位置 {len(baseline_items)} 条），"
-                    "判定为搜索失败，将由外层降级为「不显示位置」"
+                    "位置搜索结果多次重试仍未刷新，判定为搜索失败，将由外层降级为「不显示位置」"
                 )
                 return False
 
             # 给搜索接口的后续分页/补全一点缓冲：极少数情况下结果会分两批渲染
             self._random_delay(0.4, 0.8)
 
-            # 5) 在新结果列表里严格按关键词匹配，不再 fallback 首项。
-            #    匹配规则：包含完整关键词（最严）→ 找不到就放弃。
-            #    "找不到也要选个"的 fallback 在生产里多次造成选错地址，彻底删掉。
+            # 5) 在新结果列表里匹配关键词。两级匹配，仍坚持"匹配不到就放弃、绝不 fallback 首项"
+            #    （"找不到也要选个"在生产里多次造成选错地址）：
+            #      a) 精确包含完整关键词（最严）
+            #      b) 归一化（去空格 / 标点）后包含——容忍微信 POI 名称与用户填写在空格、
+            #         括号、连字符等标点上的细微差异；为避免单字误匹配，归一化关键词需 >= 2 字。
+            def _normalize(s: str) -> str:
+                return re.sub(r"[\s|·・_,.，。、《》<>「」【】\[\]()（）\-—]+", "", s or "")
+
             final_items = page.eles("css:.location-filter-wrap .location-item", timeout=1) or []
+            candidates = []
             for item in final_items:
                 try:
                     text = (item.text or "").strip()
-                    if not text or "不显示位置" in text:
-                        continue
-                    if label in text:
-                        if self._scroll_click_element(page, item):
-                            logger.info(f"已选择位置：{text}")
-                            return True
                 except Exception:
                     continue
+                if not text or "不显示位置" in text:
+                    continue
+                candidates.append((item, text))
 
-            sample = "; ".join(current_items[:5])
+            # a) 精确包含
+            for item, text in candidates:
+                if label in text:
+                    if self._scroll_click_element(page, item):
+                        logger.info(f"已选择位置：{text}")
+                        return True
+
+            # b) 归一化包含
+            norm_label = _normalize(label)
+            if len(norm_label) >= 2:
+                for item, text in candidates:
+                    if norm_label in _normalize(text):
+                        if self._scroll_click_element(page, item):
+                            logger.info(f"已选择位置：{text}（归一化匹配「{label}」）")
+                            return True
+
+            sample = "; ".join(t for _, t in candidates[:5])
             logger.warning(
-                f"搜索结果已返回但未找到包含关键词「{label}」的位置（当前结果前几条：{sample}），"
+                f"搜索结果已返回但未找到匹配关键词「{label}」的位置（当前结果前几条：{sample}），"
                 "将由外层降级为「不显示位置」"
             )
         except Exception as e:
@@ -925,9 +969,10 @@ class Uploader:
         return False
 
     def _try_js_click_link_option_video_series(self, page: ChromiumPage) -> bool:
-        """用页面内脚本点击「视频号剧集」整行（避免点到无尺寸文本节点）。"""
+        """dialog 流程前置：用页面内脚本点击「视频号剧集」整行。"""
+        logger.info("正在选择链接类型：视频号剧集")
         js = r"""
-        (function () {
+        return (function () {
           var selectors = [
             '.link-list-options .link-option-item',
             '[class*="link-option"]',
@@ -958,15 +1003,19 @@ class Uploader:
             }
           }
           return false;
-        }})();
+        })();
         """
         try:
-            return bool(page.run_js(js))
-        except Exception:
+            ok = bool(page.run_js(js))
+            if ok:
+                logger.info("已选择链接类型：视频号剧集")
+            return ok
+        except Exception as e:
+            logger.info(f"选择链接类型未完成，将尝试备用方式：{e}")
             return False
 
-    def _find_link_option_row_video_series(self, page: ChromiumPage):
-        """定位链接类型列表里「视频号剧集」所在的可点击行。"""
+    def _find_video_series_link_option(self, page: ChromiumPage):
+        """dialog 流程前置：定位「视频号剧集」链接类型行。"""
         row_selectors = [
             "css:.link-list-options .link-option-item",
             "css:.link-option-item",
@@ -983,23 +1032,56 @@ class Uploader:
                 continue
             for row in rows:
                 try:
-                    t = (row.text or "").replace("\n", " ").strip()
+                    text = (row.text or "").replace("\n", " ").strip()
                 except Exception:
-                    t = ""
-                if not t:
+                    text = ""
+                if not text:
                     continue
-                if "小程序短剧" in t and "视频号剧集" not in t:
+                if "小程序短剧" in text and "视频号剧集" not in text:
                     continue
-                if "小程序" in t and "短剧" in t and "视频号剧集" not in t:
+                if "小程序" in text and "短剧" in text and "视频号剧集" not in text:
                     continue
-                if "视频号剧集" in t:
+                if "视频号剧集" in text:
+                    logger.info("已定位到链接类型：视频号剧集")
                     return row
         return None
 
+    def _select_video_series_link_type(self, page: ChromiumPage) -> bool:
+        """dialog 流程前置：确保链接类型选择为「视频号剧集」。"""
+        if self._try_js_click_link_option_video_series(page):
+            return True
+
+        logger.info("改用元素定位方式选择链接类型")
+        option = self._find_video_series_link_option(page)
+        if not option:
+            try:
+                options_container = page.ele("css:.link-list-options", timeout=2)
+                if options_container:
+                    page.run_js(
+                        "arguments[0].scrollTop = arguments[0].scrollHeight",
+                        options_container,
+                    )
+                    self._random_delay(0.3, 0.5)
+                option = self._find_video_series_link_option(page)
+            except Exception:
+                pass
+
+        if not option:
+            try:
+                logger.info("改用文本定位方式选择链接类型")
+                option = page.ele("text:视频号剧集", timeout=2)
+            except Exception:
+                option = None
+
+        if not option:
+            return False
+        return self._scroll_click_element(page, option)
+
     def _try_js_click_picker_placeholder(self, page: ChromiumPage) -> bool:
-        """点击「选择需要添加的视频号剧集」（源码: .post-component-choose-wrap span.placeholder）。"""
+        """dialog 流程前置：点击「选择需要添加的视频号剧集」。"""
+        logger.info("正在打开剧集选择窗口")
         js = r"""
-        (function () {
+        return (function () {
           var wrap = document.querySelector('.post-component-choose-wrap');
           if (wrap) {
             var ph = wrap.querySelector('.placeholder') || wrap.querySelector('.content-wrap');
@@ -1031,12 +1113,45 @@ class Uploader:
             }
           }
           return false;
-        }})();
+        })();
         """
         try:
-            return bool(page.run_js(js))
-        except Exception:
+            ok = bool(page.run_js(js))
+            if ok:
+                logger.info("已打开剧集选择窗口")
+            return ok
+        except Exception as e:
+            logger.info(f"打开剧集选择窗口未完成，将尝试备用方式：{e}")
             return False
+
+    def _open_video_series_picker(self, page: ChromiumPage) -> bool:
+        """dialog 流程前置：打开视频号剧集选择弹层。"""
+        if self._try_js_click_picker_placeholder(page):
+            return True
+
+        logger.info("改用元素定位方式打开剧集选择窗口")
+        picker_selectors = (
+            "css:.post-component-choose-wrap .placeholder",
+            "css:.post-component-choose-wrap .content-wrap",
+            "css:.link-input-wrap .post-component-choose-wrap .content-wrap",
+            "text:选择需要关联的视频号剧集",
+            "text:选择需要添加的视频号剧集",
+            "text:选择需要关联",
+            "text:选择需要添加",
+            "xpath://*[contains(text(),'选择需要关联的视频号剧集')]",
+            "xpath://*[contains(text(),'选择需要添加的视频号剧集')]",
+            "xpath://*[contains(text(),'选择需要关联')]",
+            "xpath://*[contains(text(),'选择需要添加')]",
+        )
+        for sel in picker_selectors:
+            try:
+                picker = page.ele(sel, timeout=3)
+                if picker and self._scroll_click_element(page, picker):
+                    logger.info("已打开剧集选择窗口")
+                    return True
+            except Exception:
+                continue
+        return False
 
     @staticmethod
     def _dialog_root_from_element(ele) -> Optional[object]:
@@ -1069,21 +1184,170 @@ class Uploader:
             pass
         return False
 
-    def _is_drama_link_mounted(self, page: ChromiumPage) -> bool:
-        """检查主页面剧集链接组件是否已完成挂载（内容非空 placeholder 状态）。"""
+    def _get_mounted_drama_name(self, page: ChromiumPage, expected_name: str = "") -> str:
+        """读取主页面链接区域中已挂载的剧集名。"""
+        safe_expected = json.dumps((expected_name or "").strip(), ensure_ascii=False)
+        js = f"""
+        return (function() {{
+            var expected = {safe_expected};
+
+            function norm(el) {{
+                return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
+            }}
+
+            function valid(text) {{
+                if (!text) return false;
+                if (text.indexOf('选择需要添加') >= 0 || text.indexOf('选择需要关联') >= 0) return false;
+                if (text.indexOf('视频号剧集') >= 0 && text.length <= 8) return false;
+                return true;
+            }}
+
+            function isVideoSeriesRoot(root) {{
+                var text = norm(root);
+                if (text.indexOf('视频号剧集') < 0) return false;
+                if (text.indexOf('小程序短剧') >= 0 && text.indexOf('视频号剧集') < 0) return false;
+                return true;
+            }}
+
+            function scanDoc(doc) {{
+                var roots = [];
+                var selectors = [
+                    '.post-link-wrap',
+                    '.post-with-link',
+                    '.post-link-wrap .link-input-wrap',
+                    '.link-input-wrap'
+                ];
+                for (var s = 0; s < selectors.length; s++) {{
+                    var found = doc.querySelectorAll(selectors[s]);
+                    for (var i = 0; i < found.length; i++) roots.push(found[i]);
+                }}
+
+                var forms = doc.querySelectorAll('.form-item');
+                for (var f = 0; f < forms.length; f++) {{
+                    var label = forms[f].querySelector('.label');
+                    if (norm(label) === '链接') roots.push(forms[f]);
+                }}
+
+                for (var r = 0; r < roots.length; r++) {{
+                    var root = roots[r];
+                    var rootText = norm(root);
+                    var isSeries = isVideoSeriesRoot(root);
+
+                    var nameEls = root.querySelectorAll(
+                        '.post-component-choose-wrap .name,' +
+                        '.post-component-choose-wrap .choose-content .name,' +
+                        '.post-component-choose-wrap .choose-content,' +
+                        '.post-component-choose-wrap .content-wrap,' +
+                        '.link-input-wrap .name'
+                    );
+                    for (var n = 0; n < nameEls.length; n++) {{
+                        var text = norm(nameEls[n]);
+                        if (!isSeries && text.indexOf('视频号剧集') < 0) continue;
+                        if (expected && text.indexOf(expected) >= 0) return expected;
+                        if (valid(text)) return text;
+                    }}
+
+                    if (isSeries && expected && rootText.indexOf(expected) >= 0) return expected;
+                }}
+                return '';
+            }}
+
+            var direct = scanDoc(document);
+            if (direct) return direct;
+
+            var frames = document.querySelectorAll('iframe');
+            for (var i = 0; i < frames.length; i++) {{
+                try {{
+                    var doc = frames[i].contentDocument || (frames[i].contentWindow && frames[i].contentWindow.document);
+                    if (!doc) continue;
+                    var hit = scanDoc(doc);
+                    if (hit) return hit;
+                }} catch (e) {{}}
+            }}
+            return '';
+        }})();
+        """
+        try:
+            return str(page.run_js(js) or "").strip()
+        except Exception:
+            return ""
+
+    def _get_link_area_text_snapshot(self, page: ChromiumPage) -> str:
+        """读取链接区域文本快照，用于挂载失败时诊断。"""
         js = r"""
-        (function() {
-            var wrap = document.querySelector('.post-component-choose-wrap');
-            if (!wrap) return false;
-            var t = ((wrap.innerText || wrap.textContent) || '').replace(/\s+/g, ' ').trim();
-            if (t.indexOf('选择需要添加') >= 0 || t.indexOf('选择需要关联') >= 0) return false;
-            return t.length >= 2;
+        return (function() {
+            function norm(el) {
+                return ((el && (el.innerText || el.textContent)) || '').replace(/\s+/g, ' ').trim();
+            }
+            var chunks = [];
+            var roots = document.querySelectorAll('.post-link-wrap, .post-with-link, .link-input-wrap');
+            for (var i = 0; i < roots.length; i++) {
+                var text = norm(roots[i]);
+                if (text) chunks.push(text.slice(0, 200));
+            }
+            var forms = document.querySelectorAll('.form-item');
+            for (var f = 0; f < forms.length; f++) {
+                var label = forms[f].querySelector('.label');
+                if (norm(label) === '链接') {
+                    var formText = norm(forms[f]);
+                    if (formText) chunks.push(formText.slice(0, 200));
+                }
+            }
+            return chunks.join(' || ');
         })();
         """
         try:
-            return bool(page.run_js(js))
+            return str(page.run_js(js) or "").strip()
         except Exception:
-            return False
+            return ""
+
+    def _verify_drama_name_on_page(self, page: ChromiumPage, drama_name: str) -> bool:
+        """在发表页面上搜索剧集名文本，确认剧集链接已成功挂载。
+        仅搜索链接组件区域（.post-link-wrap / .link-input-wrap），避免误匹配描述等其他字段。
+        """
+        name = (drama_name or "").strip()
+        if not name:
+            return True
+        mounted_name = self._get_mounted_drama_name(page, name)
+        if mounted_name and (name in mounted_name or mounted_name in name):
+            logger.info(f"已确认剧集链接：{mounted_name}")
+            return True
+        if mounted_name:
+            logger.info(f"当前剧集链接与目标不一致：当前「{mounted_name}」，目标「{name}」")
+        else:
+            snapshot = self._get_link_area_text_snapshot(page)
+            if snapshot:
+                logger.debug(f"当前链接区域内容：{snapshot}")
+            else:
+                logger.debug("暂未检测到已挂载的剧集链接")
+        return False
+
+    def _verify_expected_drama_mounted(self, page: ChromiumPage, drama_name: str) -> bool:
+        """确认主页面链接区域已经挂载期望剧集。"""
+        name = (drama_name or "").strip()
+        if name:
+            return self._verify_drama_name_on_page(page, name)
+
+        mounted_name = self._get_mounted_drama_name(page)
+        if mounted_name:
+            logger.info(f"页面已有剧集链接：{mounted_name}")
+            return True
+        return False
+
+    def _wait_for_expected_drama_mounted(
+        self, page: ChromiumPage, drama_name: str, timeout: float = 6.0
+    ) -> bool:
+        """短暂等待目标剧集挂载到主页面链接区域。"""
+        logger.info(f"等待剧集链接挂载完成：{drama_name}")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._check_browser_alive(page)
+            if self._verify_expected_drama_mounted(page, drama_name):
+                logger.info(f"剧集链接已挂载：{drama_name}")
+                return True
+            time.sleep(0.35)
+        logger.info(f"等待剧集链接挂载超时：{drama_name}")
+        return False
 
     def _wait_for_drama_link_loaded(self, page: ChromiumPage, timeout: float = 12.0):
         """等待主页面剧集链接组件完成数据加载（无 loading 动画）再继续。"""
@@ -1109,6 +1373,7 @@ class Uploader:
         Returns:
             bool: 成功点击返回 True，超时未点击返回 False。
         """
+        logger.info("正在确认剧集选择")
         btn_selectors = (
             "xpath://h3[contains(.,'视频号剧集')]"
             "/ancestor::div[contains(@class,'weui-desktop-dialog')]//button[contains(@class,'weui-desktop-btn_primary')]",
@@ -1130,14 +1395,15 @@ class Uploader:
                     cls = btn.attr("class") or ""
                     if isinstance(cls, str) and "disabled" in cls:
                         # 按钮暂时禁用，等下一轮
+                        logger.info(f"剧集确认按钮暂不可用：{tx}")
                         break
                     self._scroll_click_element(page, btn)
-                    logger.info(f"已点击剧集弹层按钮: {tx}")
+                    logger.info(f"已点击剧集确认按钮：{tx}")
                     return True
                 except Exception:
                     continue
             time.sleep(0.4)
-        logger.warning("未能点击剧集弹层确认按钮（超时 8 秒）")
+        logger.info("未找到可点击的剧集确认按钮，继续检查是否已自动挂载")
         return False
 
     def _check_browser_alive(self, page: ChromiumPage) -> None:
@@ -1154,7 +1420,7 @@ class Uploader:
         """
         # 用 JS 从「选择需要关联的视频号剧集」标题反查浮层容器，再给搜索 input 打标。
         js = r"""
-        (function () {
+        return (function () {
           document.querySelectorAll('input[data-vd-drama-search]').forEach(function (el) {
             el.removeAttribute('data-vd-drama-search');
           });
@@ -1301,25 +1567,33 @@ class Uploader:
         })();
         """
         try:
-            if not page.run_js(js):
+            marked = bool(page.run_js(js))
+            if marked:
+                logger.info("已定位剧集搜索框")
+            if not marked:
                 return None
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
                 raise
+            logger.info(f"定位剧集搜索框失败：{e}")
             return None
 
         try:
             el = page.ele("css:input[data-vd-drama-search='1']", timeout=2)
+            if el:
+                logger.info("已获取剧集搜索框")
             return el
-        except Exception:
+        except Exception as e:
+            logger.info(f"获取剧集搜索框失败：{e}")
             return None
 
     def _js_search_drama_dialog(self, page: ChromiumPage, drama_query: str) -> bool:
         """在剧集浮层内直接输入搜索词；覆盖主文档、同源 iframe 和 shadow DOM。"""
+        logger.info(f"正在搜索剧集：{drama_query}")
         safe_query = json.dumps((drama_query or "").strip(), ensure_ascii=False)
         js = f"""
-        (function () {{
+        return (function () {{
           var query = {safe_query};
           function text(el) {{
             return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
@@ -1417,19 +1691,154 @@ class Uploader:
         }})();
         """
         try:
-            return bool(page.run_js(js))
+            ok = bool(page.run_js(js))
+            if ok:
+                logger.info(f"已输入剧集搜索词：{self._get_drama_search_value_snapshot(page) or drama_query}")
+            else:
+                logger.info("未能自动输入剧集搜索词，将尝试其他选择方式")
+            return ok
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
                 raise
-            logger.warning(f"JS 搜索剧集输入失败: {e}")
+            logger.warning(f"输入剧集搜索词失败: {e}")
             return False
+
+    def _get_drama_search_value_snapshot(self, page: ChromiumPage) -> str:
+        """读取剧集弹层搜索框当前值，用于确认真实输入路径。"""
+        js = r"""
+        return (function () {
+          function visible(el) {
+            if (!el) return false;
+            var style = el.ownerDocument.defaultView.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }
+          function findInDoc(doc, seen) {
+            if (!doc || seen.indexOf(doc) >= 0) return '';
+            seen.push(doc);
+            var inputs = doc.querySelectorAll(
+              'input[data-vd-drama-search="1"],input.weui-desktop-form__input[placeholder="搜索内容"],input[placeholder="搜索内容"],input[placeholder*="搜索"]'
+            );
+            var hiddenValue = '';
+            for (var i = inputs.length - 1; i >= 0; i--) {
+              var ph = inputs[i].getAttribute('placeholder') || '';
+              if (ph.indexOf('小游戏') >= 0 || ph.indexOf('小说') >= 0) continue;
+              var value = inputs[i].value || '';
+              if (visible(inputs[i]) && value) return value;
+              if (!hiddenValue && value) hiddenValue = value;
+            }
+            if (hiddenValue) return hiddenValue;
+            var all = doc.querySelectorAll('*');
+            for (var s = 0; s < all.length; s++) {
+              if (all[s].shadowRoot) {
+                var shadowHit = findInDoc(all[s].shadowRoot, seen);
+                if (shadowHit) return shadowHit;
+              }
+            }
+            var frames = doc.querySelectorAll('iframe,frame');
+            for (var f = 0; f < frames.length; f++) {
+              try {
+                var frameHit = findInDoc(frames[f].contentDocument, seen);
+                if (frameHit) return frameHit;
+              } catch (e) {}
+            }
+            return '';
+          }
+          return findInDoc(document, []);
+        })();
+        """
+        try:
+            return str(page.run_js(js) or "").strip()
+        except Exception:
+            return ""
+
+    def _get_drama_dialog_debug_snapshot(self, page: ChromiumPage, query: str = "") -> str:
+        """读取剧集弹层关键 DOM 快照，用于定位“肉眼可见但脚本不可见”的状态。"""
+        safe_query = json.dumps((query or "").strip(), ensure_ascii=False)
+        js = f"""
+        return (function () {{
+          var query = {safe_query};
+          function norm(el) {{
+            return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }}
+          function visible(el) {{
+            if (!el) return false;
+            var style = el.ownerDocument.defaultView.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          }}
+          function collectDoc(doc, name, out) {{
+            if (!doc) return;
+            var inputs = doc.querySelectorAll('input,textarea,[contenteditable="true"]');
+            for (var i = 0; i < inputs.length && out.inputs.length < 20; i++) {{
+              var el = inputs[i];
+              var value = el.value || el.getAttribute('value') || norm(el);
+              var placeholder = el.getAttribute('placeholder') || '';
+              if (!value && !placeholder) continue;
+              out.inputs.push({{
+                doc: name,
+                tag: (el.tagName || '').toLowerCase(),
+                placeholder: placeholder,
+                value: value,
+                visible: visible(el),
+                cls: String(el.className || '').slice(0, 80)
+              }});
+            }}
+
+            var dialogs = doc.querySelectorAll(
+              '.weui-desktop-dialog,[class*="weui-desktop-dialog"],[role="dialog"],[class*="dialog"],[class*="modal"],.dialog-wrap'
+            );
+            for (var d = 0; d < dialogs.length && out.dialogs.length < 12; d++) {{
+              var text = norm(dialogs[d]);
+              if (!text) continue;
+              out.dialogs.push({{
+                doc: name,
+                visible: visible(dialogs[d]),
+                cls: String(dialogs[d].className || '').slice(0, 80),
+                text: text.slice(0, 260)
+              }});
+            }}
+
+            var links = doc.querySelectorAll('.post-link-wrap,.post-with-link,.link-input-wrap,.post-component-choose-wrap');
+            for (var l = 0; l < links.length && out.links.length < 12; l++) {{
+              var linkText = norm(links[l]);
+              if (!linkText) continue;
+              out.links.push({{
+                doc: name,
+                visible: visible(links[l]),
+                cls: String(links[l].className || '').slice(0, 80),
+                text: linkText.slice(0, 220)
+              }});
+            }}
+            if (query && norm(doc.body).indexOf(query) >= 0) out.bodyHasQuery = true;
+          }}
+
+          var out = {{ inputs: [], dialogs: [], links: [], bodyHasQuery: false, frames: 0 }};
+          collectDoc(document, 'main', out);
+          var frames = document.querySelectorAll('iframe,frame');
+          out.frames = frames.length;
+          for (var f = 0; f < frames.length; f++) {{
+            try {{
+              collectDoc(frames[f].contentDocument, 'frame' + f, out);
+            }} catch (e) {{}}
+          }}
+          return JSON.stringify(out);
+        }})();
+        """
+        try:
+            return str(page.run_js(js) or "").strip()
+        except Exception as e:
+            return f"debug snapshot failed: {e}"
 
     def _js_pick_first_drama_row(self, page: ChromiumPage, drama_query: str = "") -> bool:
         """在剧集表格中点击一行：有剧名关键词则优先匹配 `.drama-title`，否则首条。"""
+        logger.debug(f"正在选择匹配剧集：{drama_query or '首条结果'}")
         safe_query = json.dumps((drama_query or "").strip(), ensure_ascii=False)
         js = f"""
-        (function () {{
+        return (function () {{
           var preferred = {safe_query};
           function text(el) {{
             return ((el && (el.innerText || el.textContent)) || '').replace(/\\s+/g, ' ').trim();
@@ -1539,11 +1948,15 @@ class Uploader:
         }})();
         """
         try:
-            return bool(page.run_js(js))
+            ok = bool(page.run_js(js))
+            if ok:
+                logger.info("已选择匹配剧集")
+            return ok
         except Exception as e:
             msg = str(e).lower()
             if any(k in msg for k in ("disconnected", "target closed", "session", "connection refused")):
                 raise
+            logger.info(f"选择匹配剧集失败：{e}")
             return False
 
     def _search_and_select_native_drama(self, page: ChromiumPage, drama_name: Optional[str]) -> bool:
@@ -1555,27 +1968,50 @@ class Uploader:
 
         # 检测浏览器是否存活
         self._check_browser_alive(page)
+        logger.info(f"开始选择视频号剧集：{query}")
+        if self._verify_expected_drama_mounted(page, query):
+            logger.info("剧集链接已存在，跳过选择流程")
+            return True
 
-        # 等待弹层出现并定位搜索框
+        # 等待弹层出现并定位搜索框。搜索框在微信浮层里经常被 Vue/隐藏 pane 包裹，
+        # 页面可能已经完成搜索但自动化侧仍定位不到输入框，所以这里短等即可。
+        logger.info("正在定位剧集搜索框")
         search_input = None
-        for attempt in range(20):
+        preselected = False
+        for attempt in range(5):
             self._check_browser_alive(page)
+            if self._verify_expected_drama_mounted(page, query):
+                logger.info("剧集链接已挂载，停止搜索框定位")
+                return True
             search_input = self._find_drama_dialog_search_input(page)
             if search_input:
+                logger.info("已定位到剧集搜索框")
+                break
+            if self._js_pick_first_drama_row(page, query):
+                logger.info(f"已直接选中匹配剧集：{query}")
+                preselected = True
                 break
             time.sleep(0.3)
 
-        logger.info(f"搜索剧集: {query}, 已定位搜索框: {bool(search_input)}")
+        logger.info(
+            f"搜索剧集: {query}, 已定位搜索框: {search_input is not None}, "
+            f"当前搜索值: {self._get_drama_search_value_snapshot(page) or '-'}"
+        )
 
         js_search_done = False
-        if query:
+        if query and not preselected:
+            logger.info("正在输入剧集搜索词")
             js_search_done = self._js_search_drama_dialog(page, query)
-            logger.info(f"JS 搜索剧集: {query}, 已触发输入: {js_search_done}")
+            logger.info(
+                f"JS 搜索剧集: {query}, 已触发输入: {js_search_done}, "
+                f"当前搜索值: {self._get_drama_search_value_snapshot(page) or '-'}"
+            )
             if js_search_done:
                 self._random_delay(1.2, 1.8)
 
-        if search_input and not js_search_done:
+        if search_input and not js_search_done and not preselected:
             try:
+                logger.info("改用人工输入方式填写剧集搜索词")
                 self._scroll_click_element(page, search_input)
                 self._random_delay(0.2, 0.4)
                 try:
@@ -1600,6 +2036,10 @@ class Uploader:
                         )
                     except Exception:
                         pass
+                    logger.info(
+                        f"人工输入剧集搜索词完成: {query}, "
+                        f"当前搜索值: {self._get_drama_search_value_snapshot(page) or '-'}"
+                    )
                 self._random_delay(1.2, 1.8)
             finally:
                 try:
@@ -1610,34 +2050,76 @@ class Uploader:
                 except Exception:
                     pass
         else:
-            if not search_input and not js_search_done:
-                logger.info("未通过脚本定位剧集搜索框，继续等待剧集列表结果")
+            if not preselected and not search_input and not js_search_done:
+                logger.info("未定位到搜索框，改为直接扫描剧集列表")
+                if self._verify_expected_drama_mounted(page, query):
+                    logger.info("剧集链接已挂载，停止列表扫描")
+                    return True
+
+        if preselected:
+            disp = query or "（首条结果）"
+            if self._wait_for_expected_drama_mounted(page, query, timeout=2.0):
+                logger.info(f"剧集链接已自动挂载：{disp}")
+                return True
+            confirmed = self._confirm_native_drama_dialog(page)
+            if confirmed:
+                logger.info(f"剧集已确认：{disp}")
+            else:
+                logger.info(f"剧集已选中，等待链接写入：{disp}")
+            if self._wait_for_expected_drama_mounted(page, query, timeout=12.0):
+                logger.info(f"剧集链接已挂载：{disp}")
+                return True
+            logger.warning(f"剧集「{disp}」选中后未写回主页面链接组件")
+            return False
 
         # 循环等待并点击第一条剧集
+        logger.info("正在从剧集列表中选择匹配项")
         deadline = time.time() + 18.0
+        pick_attempt = 0
         while time.time() < deadline:
+            pick_attempt += 1
             self._check_browser_alive(page)
+            if self._verify_expected_drama_mounted(page, query):
+                logger.info("剧集链接已挂载，停止列表选择")
+                return True
 
             if self._js_pick_first_drama_row(page, query):
                 disp = query or "（首条结果）"
                 logger.info(f"已选择剧集: {disp}")
                 self._random_delay(0.35, 0.6)
-                if not self._confirm_native_drama_dialog(page):
-                    # 部分微信版本点选行后弹层自动关闭，无需再点确认按钮。
-                    # 此时弹层已消失、剧集已挂载，但确认函数会超时返回 False，
-                    # 用主页面组件内容做兜底判断，避免将已成功的挂载误判为失败。
-                    if self._is_drama_link_mounted(page):
-                        logger.info(f"弹层确认按钮未触发，但剧集链接已出现在主页面，视为挂载成功")
-                    else:
-                        logger.warning(f"剧集「{disp}」已选中但弹层确认失败，剧集链接挂载失败")
-                        return False
-                return True
+                if self._wait_for_expected_drama_mounted(page, query, timeout=2.0):
+                    logger.info(f"剧集链接已自动挂载：{disp}")
+                    return True
+                confirmed = self._confirm_native_drama_dialog(page)
+                if confirmed:
+                    logger.info(f"剧集已确认：{disp}")
+                else:
+                    logger.info(f"剧集已选中，等待链接写入：{disp}")
+
+                if self._wait_for_expected_drama_mounted(page, query, timeout=12.0):
+                    logger.info(f"剧集链接已挂载：{disp}")
+                    return True
+
+                mounted_name = self._get_mounted_drama_name(page, query)
+                if mounted_name:
+                    logger.warning(
+                        f"剧集「{disp}」选择后主页面挂载了其他剧集：当前「{mounted_name}」，期望「{query}」"
+                    )
+                else:
+                    logger.warning(f"剧集「{disp}」选择后未写回主页面链接组件")
+                return False
 
             time.sleep(0.45)
 
-        if not search_input and not js_search_done:
-            logger.warning("未找到剧集搜索输入框，且未能通过当前列表选择剧集")
-        logger.warning(f"剧集列表未出现可点击行: {query or '(关键词为空)'}")
+        if self._wait_for_expected_drama_mounted(page, query):
+            logger.info("剧集链接已挂载")
+            return True
+
+        mounted_name = self._get_mounted_drama_name(page, query)
+        if mounted_name:
+            logger.info(f"页面已有剧集挂载，但名称不匹配：当前「{mounted_name}」，期望「{query}」")
+
+        logger.warning(f"剧集链接未挂载成功: {query or '(关键词为空)'}")
         return False
 
     def _add_drama_link(self, page: ChromiumPage, drama_name: str) -> bool:
@@ -1657,87 +2139,29 @@ class Uploader:
                 logger.warning("未找到链接区域")
                 return False
 
+            logger.info("正在打开链接设置")
             if not self._scroll_click_element(page, link_wrap):
                 logger.warning("点击链接区域失败")
                 return False
 
             self._random_delay(0.8, 1.3)
 
-            clicked_series = self._try_js_click_link_option_video_series(page)
-            if clicked_series:
-                logger.info("已通过脚本选择「视频号剧集」")
-            else:
-                drama_option = self._find_link_option_row_video_series(page)
-                if not drama_option:
-                    try:
-                        options_container = page.ele("css:.link-list-options", timeout=2)
-                        if options_container:
-                            page.run_js(
-                                "arguments[0].scrollTop = arguments[0].scrollHeight",
-                                options_container,
-                            )
-                            self._random_delay(0.3, 0.5)
-                        drama_option = self._find_link_option_row_video_series(page)
-                    except Exception:
-                        pass
-
-                if not drama_option:
-                    try:
-                        hint = page.ele("text:视频号剧集", timeout=2)
-                        if hint:
-                            drama_option = hint
-                    except Exception:
-                        drama_option = None
-
-                if not drama_option:
-                    logger.warning("未找到「视频号剧集」选项（已跳过小程序短剧）")
-                    return False
-
-                if not self._scroll_click_element(page, drama_option):
-                    logger.warning("选择「视频号剧集」失败")
-                    return False
+            if not self._select_video_series_link_type(page):
+                logger.warning("选择「视频号剧集」失败")
+                return False
+            logger.info("已选择「视频号剧集」")
 
             self._random_delay(0.6, 1)
 
-            # 选类型后出现「选择需要添加的视频号剧集」（.post-component-choose-wrap .placeholder）
-            picker_clicked = False
-            try:
-                if self._try_js_click_picker_placeholder(page):
-                    picker_clicked = True
-                    logger.info("已通过脚本点击剧集选择入口 (.post-component-choose-wrap)")
-                    self._random_delay(0.6, 1)
-            except Exception:
-                pass
+            if not self._open_video_series_picker(page):
+                logger.warning("未打开剧集选择入口")
+                return False
+            logger.info("已打开剧集选择窗口")
+            self._random_delay(0.6, 1)
 
-            if not picker_clicked:
-                picker_labels = (
-                    "css:.post-component-choose-wrap .placeholder",
-                    "css:.post-component-choose-wrap .content-wrap",
-                    "css:.link-input-wrap .post-component-choose-wrap .content-wrap",
-                    "text:选择需要关联的视频号剧集",
-                    "text:选择需要添加的视频号剧集",
-                    "text:选择需要关联",
-                    "text:选择需要添加",
-                    "xpath://*[contains(text(),'选择需要关联的视频号剧集')]",
-                    "xpath://*[contains(text(),'选择需要添加的视频号剧集')]",
-                    "xpath://*[contains(text(),'选择需要关联')]",
-                    "xpath://*[contains(text(),'选择需要添加')]",
-                )
-                for picker_sel in picker_labels:
-                    try:
-                        picker = page.ele(picker_sel, timeout=5)
-                        if picker and self._scroll_click_element(page, picker):
-                            picker_clicked = True
-                            logger.info("已点击剧集选择入口（关联/添加视频号剧集）")
-                            self._random_delay(0.6, 1)
-                            break
-                    except Exception:
-                        continue
-
-            if not picker_clicked:
-                logger.info("未找到「选择需要添加的视频号剧集」，尝试在当前层搜索")
-
+            logger.info("正在搜索并选择剧集")
             if not self._search_and_select_native_drama(page, drama_name):
+                logger.warning(f"剧集选择失败：{drama_name}")
                 return False
 
             # 剧集挂载后，组件会发起网络请求加载剧集预览数据，期间发表按钮可能仍 disabled。

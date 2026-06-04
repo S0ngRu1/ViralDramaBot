@@ -61,6 +61,7 @@ class WeixinDAO:
                     proxy_location TEXT,
                     proxy_profile_id INTEGER,
                     location_label TEXT,
+                    drama_link TEXT,
                     FOREIGN KEY (account_id) REFERENCES accounts(id)
                 );
 
@@ -119,6 +120,7 @@ class WeixinDAO:
                 ("proxy_location", "TEXT"),
                 ("proxy_profile_id", "INTEGER"),
                 ("location_label", "TEXT"),
+                ("drama_link", "TEXT"),
             ):
                 if col_name not in existing_cols:
                     conn.execute(f"ALTER TABLE upload_tasks ADD COLUMN {col_name} {col_def}")
@@ -325,6 +327,7 @@ class WeixinDAO:
         scheduled_at: Optional[str] = None,
         proxy_profile_id: Optional[int] = None,
         location_label: Optional[str] = None,
+        drama_link: Optional[str] = None,
     ) -> int:
         """创建上传任务"""
         now = datetime.now().isoformat()
@@ -333,8 +336,8 @@ class WeixinDAO:
             cursor = conn.execute(
                 """INSERT INTO upload_tasks
                 (account_id, video_path, title, description, tags, status, metadata_source,
-                 scheduled_at, created_at, proxy_profile_id, location_label)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 scheduled_at, created_at, proxy_profile_id, location_label, drama_link)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     account_id,
                     video_path,
@@ -347,6 +350,7 @@ class WeixinDAO:
                     now,
                     proxy_profile_id,
                     location_label,
+                    drama_link,
                 ),
             )
             return cursor.lastrowid

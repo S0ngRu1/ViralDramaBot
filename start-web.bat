@@ -25,6 +25,10 @@ REM 安装依赖
 echo 📦 检查依赖...
 python -m pip install -q -r requirements.txt
 
+REM 与打包版桌面软件共用同一份数据目录（账号、cookies、数据库）
+set "WORK_DIR=%APPDATA%\ViralDramaBot"
+echo 📂 数据目录: %WORK_DIR%
+
 REM 启动应用
 echo.
 echo ⚡ 启动 FastAPI 服务器...

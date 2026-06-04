@@ -3,7 +3,6 @@
 """ViralDramaBot 打包桌面版入口。"""
 
 import logging
-import math
 import multiprocessing
 import os
 import socket
@@ -24,158 +23,6 @@ VIDEO_FILE_TYPES = (
     "Video files (*.mp4;*.avi;*.mov;*.mkv;*.flv;*.wmv)",
     "All files (*.*)",
 )
-
-class StartupSplash:
-    """启动等待窗：纯紫色背景 + 简易卡通动画（Tk Canvas）。"""
-
-    WIDTH = 520
-    HEIGHT = 380
-    BG = "#6366f1"
-
-    def __init__(self, root, bundle_dir: Path) -> None:
-        import tkinter as tk
-
-        self._tk = tk
-        self.root = root
-        self.frame = 0
-        self.canvas = tk.Canvas(
-            root,
-            width=self.WIDTH,
-            height=self.HEIGHT,
-            bg=self.BG,
-            highlightthickness=0,
-        )
-        self.canvas.pack(fill="both", expand=True)
-        self._draw_decorative_clouds()
-
-    def _draw_decorative_clouds(self) -> None:
-        clouds = (
-            (70, 55, "#ffffff"),
-            (430, 70, "#ffffff"),
-            (95, 300, "#ffffff"),
-            (400, 285, "#ffffff"),
-        )
-        for x, y, color in clouds:
-            self.canvas.create_oval(
-                x - 36, y - 18, x + 36, y + 18, fill=color, outline="", tags="bg"
-            )
-            self.canvas.create_oval(
-                x - 18, y - 26, x + 46, y + 10, fill=color, outline="", tags="bg"
-            )
-            self.canvas.create_oval(
-                x - 46, y - 10, x + 10, y + 22, fill=color, outline="", tags="bg"
-            )
-
-    def animate(self) -> None:
-        self.frame += 1
-        self.canvas.delete("anim")
-
-        cx = self.WIDTH // 2
-        cy = self.HEIGHT // 2 - 12
-        t = self.frame * 0.09
-
-        bounce = int(7 * math.sin(t))
-        self._draw_mascot(cx, cy + 58 + bounce)
-
-        orbit_colors = (
-            "#f9a8d4",
-            "#93c5fd",
-            "#fde68a",
-            "#a7f3d0",
-            "#c4b5fd",
-            "#fda4af",
-        )
-        for i, color in enumerate(orbit_colors):
-            angle = t + i * (2 * math.pi / len(orbit_colors))
-            rx = 92
-            ry = 52
-            x = cx + int(rx * math.cos(angle))
-            y = cy + int(ry * math.sin(angle))
-            r = 6 + (i % 2)
-            self.canvas.create_oval(
-                x - r, y - r, x + r, y + r, fill=color, outline="", tags="anim"
-            )
-
-        title_y = self.HEIGHT - 96
-        self.canvas.create_text(
-            cx,
-            title_y,
-            text="正在启动 ViralDramaBot",
-            font=("Microsoft YaHei UI", 15, "bold"),
-            fill="#ffffff",
-            tags="anim",
-        )
-
-        dot_y = self.HEIGHT - 58
-        for i in range(3):
-            hop = -10 if ((self.frame // 7 + i) % 3) == 0 else 0
-            dx = cx - 22 + i * 22
-            self.canvas.create_oval(
-                dx - 5,
-                dot_y + hop - 5,
-                dx + 5,
-                dot_y + hop + 5,
-                fill="#c7d2fe",
-                outline="",
-                tags="anim",
-            )
-
-        dots = "." * (1 + (self.frame // 12) % 3)
-        self.canvas.create_text(
-            cx,
-            self.HEIGHT - 30,
-            text=f"正在加载服务，请稍候{dots}",
-            font=("Microsoft YaHei UI", 10),
-            fill="#c7d2fe",
-            tags="anim",
-        )
-
-    def _draw_mascot(self, cx: int, cy: int) -> None:
-        self.canvas.create_oval(
-            cx - 30,
-            cy - 26,
-            cx + 30,
-            cy + 30,
-            fill="#fff7ed",
-            outline="#fdba74",
-            width=2,
-            tags="anim",
-        )
-        self.canvas.create_oval(
-            cx - 24, cy + 2, cx - 14, cy + 11, fill="#fecdd3", outline="", tags="anim"
-        )
-        self.canvas.create_oval(
-            cx + 14, cy + 2, cx + 24, cy + 11, fill="#fecdd3", outline="", tags="anim"
-        )
-
-        if (self.frame // 28) % 14 == 0:
-            self.canvas.create_line(
-                cx - 13, cy - 5, cx - 7, cy - 5, fill="#334155", width=2, tags="anim"
-            )
-            self.canvas.create_line(
-                cx + 7, cy - 5, cx + 13, cy - 5, fill="#334155", width=2, tags="anim"
-            )
-        else:
-            self.canvas.create_oval(
-                cx - 15, cy - 11, cx - 7, cy - 3, fill="#334155", outline="", tags="anim"
-            )
-            self.canvas.create_oval(
-                cx + 7, cy - 11, cx + 15, cy - 3, fill="#334155", outline="", tags="anim"
-            )
-
-        self.canvas.create_arc(
-            cx - 11,
-            cy - 1,
-            cx + 11,
-            cy + 13,
-            start=200,
-            extent=140,
-            style="arc",
-            outline="#334155",
-            width=2,
-            tags="anim",
-        )
-
 
 class DesktopApi:
     def __init__(self) -> None:
@@ -423,42 +270,16 @@ def _wait_for_backend(
     """
     在创建 pywebview 窗口之前等待后端就绪。
 
-    WebView2 要求 load_url 等在 UI 线程执行；若在 webview.start(func) 回调里跳转，
-    会触发 “CoreWebView2Controller members can only be accessed from the UI thread”。
+    打包版曾用 tkinter 启动画面显示等待状态，但 Windows 崩溃日志显示上传阶段
+    偶发 APPCRASH，故障模块为 tcl86t.dll。这里避免在桌面主进程加载 Tk/Tcl，
+    只做后台等待，保留 pywebview 作为唯一 UI 运行时。
     """
     timeout = 120.0 if is_frozen() else 45.0
     backend.begin()
     logger.info("等待本地服务启动（最多 %.0f 秒）…", timeout)
 
-    try:
-        import tkinter as tk
-
-        root = tk.Tk()
-        root.title(APP_NAME)
-        root.resizable(False, False)
-        splash = StartupSplash(root, get_bundle_dir())
-        screen_w = root.winfo_screenwidth()
-        screen_h = root.winfo_screenheight()
-        x = max(0, (screen_w - splash.WIDTH) // 2)
-        y = max(0, (screen_h - splash.HEIGHT) // 2)
-        root.geometry(f"{splash.WIDTH}x{splash.HEIGHT}+{x}+{y}")
-
-        deadline = time.monotonic() + timeout
-
-        def poll() -> None:
-            if backend.wait(0) or time.monotonic() >= deadline:
-                root.quit()
-                return
-            splash.animate()
-            root.after(50, poll)
-
-        poll()
-        root.mainloop()
-        root.destroy()
-    except Exception as exc:
-        logger.warning("Tk 等待窗口不可用，改为后台等待: %s", exc)
-        if not backend.wait(timeout):
-            return None, f"服务启动超时（{timeout:.0f} 秒）"
+    if not backend.wait(timeout):
+        return None, f"服务启动超时（{timeout:.0f} 秒）"
 
     if not backend.wait(0):
         return None, f"服务启动超时（{timeout:.0f} 秒）"
