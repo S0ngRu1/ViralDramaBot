@@ -26,11 +26,11 @@ VIDEO_FILE_TYPES = (
 )
 
 class StartupSplash:
-    """启动等待窗：淡色大图标背景 + 简易卡通动画（Tk Canvas）。"""
+    """启动等待窗：纯紫色背景 + 简易卡通动画（Tk Canvas）。"""
 
     WIDTH = 520
     HEIGHT = 380
-    BG = "#eef2ff"
+    BG = "#6366f1"
 
     def __init__(self, root, bundle_dir: Path) -> None:
         import tkinter as tk
@@ -46,32 +46,14 @@ class StartupSplash:
             highlightthickness=0,
         )
         self.canvas.pack(fill="both", expand=True)
-        self._logo_watermark = self._load_faint_logo(bundle_dir)
         self._draw_decorative_clouds()
-
-    def _load_faint_logo(self, bundle_dir: Path):
-        tk = self._tk
-        frontend = bundle_dir / "frontend"
-        for name in ("logo.png", "logo.ico"):
-            path = frontend / name
-            if not path.exists():
-                continue
-            try:
-                raw = tk.PhotoImage(file=str(path))
-                if hasattr(raw, "zoom"):
-                    # 放大作背景水印；stipple 在 Windows 上可呈现淡淡效果
-                    return raw.zoom(6, 6)
-                return raw
-            except Exception:
-                continue
-        return None
 
     def _draw_decorative_clouds(self) -> None:
         clouds = (
-            (70, 55, "#e0e7ff"),
-            (430, 70, "#dbeafe"),
-            (95, 300, "#e0f2fe"),
-            (400, 285, "#ede9fe"),
+            (70, 55, "#ffffff"),
+            (430, 70, "#ffffff"),
+            (95, 300, "#ffffff"),
+            (400, 285, "#ffffff"),
         )
         for x, y, color in clouds:
             self.canvas.create_oval(
@@ -91,16 +73,6 @@ class StartupSplash:
         cx = self.WIDTH // 2
         cy = self.HEIGHT // 2 - 12
         t = self.frame * 0.09
-
-        if self._logo_watermark is not None:
-            self.canvas.create_image(
-                cx,
-                cy - 8,
-                image=self._logo_watermark,
-                anchor="center",
-                stipple="gray25",
-                tags="anim",
-            )
 
         bounce = int(7 * math.sin(t))
         self._draw_mascot(cx, cy + 58 + bounce)
@@ -130,7 +102,7 @@ class StartupSplash:
             title_y,
             text="正在启动 ViralDramaBot",
             font=("Microsoft YaHei UI", 15, "bold"),
-            fill="#4338ca",
+            fill="#ffffff",
             tags="anim",
         )
 
@@ -143,7 +115,7 @@ class StartupSplash:
                 dot_y + hop - 5,
                 dx + 5,
                 dot_y + hop + 5,
-                fill="#6366f1",
+                fill="#c7d2fe",
                 outline="",
                 tags="anim",
             )
@@ -154,7 +126,7 @@ class StartupSplash:
             self.HEIGHT - 30,
             text=f"正在加载服务，请稍候{dots}",
             font=("Microsoft YaHei UI", 10),
-            fill="#64748b",
+            fill="#c7d2fe",
             tags="anim",
         )
 
@@ -207,15 +179,20 @@ class StartupSplash:
 
 class DesktopApi:
     def __init__(self) -> None:
-        self.window = None
+        # 必须用下划线前缀的“私有”属性保存 window。
+        # pywebview 注入 JS API 时会递归遍历 js_api 的所有公开属性，
+        # 若把 window 暴露为公开属性，会顺着 window.native（WinForms Form）
+        # 无限递归遍历整个 .NET 对象树，触发 maximum recursion depth exceeded
+        # 并刷爆日志、拖垮 UI 线程，导致界面卡死。
+        self._window = None
 
     def bind(self, window) -> None:
-        self.window = window
+        self._window = window
 
     def browseFile(self):
         import webview
 
-        paths = self.window.create_file_dialog(
+        paths = self._window.create_file_dialog(
             webview.OPEN_DIALOG,
             allow_multiple=False,
             file_types=VIDEO_FILE_TYPES,
@@ -227,7 +204,7 @@ class DesktopApi:
     def browseFiles(self):
         import webview
 
-        paths = self.window.create_file_dialog(
+        paths = self._window.create_file_dialog(
             webview.OPEN_DIALOG,
             allow_multiple=True,
             file_types=VIDEO_FILE_TYPES,
@@ -239,7 +216,7 @@ class DesktopApi:
     def browseDirectory(self):
         import webview
 
-        paths = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        paths = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if not paths:
             return {"status": "cancelled", "message": "未选择目录"}
         return {"status": "success", "path": paths[0]}
