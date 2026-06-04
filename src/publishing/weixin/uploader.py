@@ -1069,30 +1069,76 @@ class Uploader:
             pass
         return False
 
-    def _confirm_native_drama_dialog(self, page: ChromiumPage) -> None:
-        """点击剧集弹层底部的「添加」按钮（通过 dialog 标题定位，不检查可见性）。"""
+    def _is_drama_link_mounted(self, page: ChromiumPage) -> bool:
+        """检查主页面剧集链接组件是否已完成挂载（内容非空 placeholder 状态）。"""
+        js = r"""
+        (function() {
+            var wrap = document.querySelector('.post-component-choose-wrap');
+            if (!wrap) return false;
+            var t = ((wrap.innerText || wrap.textContent) || '').replace(/\s+/g, ' ').trim();
+            if (t.indexOf('选择需要添加') >= 0 || t.indexOf('选择需要关联') >= 0) return false;
+            return t.length >= 2;
+        })();
+        """
+        try:
+            return bool(page.run_js(js))
+        except Exception:
+            return False
+
+    def _wait_for_drama_link_loaded(self, page: ChromiumPage, timeout: float = 12.0):
+        """等待主页面剧集链接组件完成数据加载（无 loading 动画）再继续。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                spin = page.ele(
+                    "css:.post-component-choose-wrap .ant-spin-spinning,"
+                    ".post-component-choose-wrap .loading,"
+                    ".link-input-wrap .ant-spin-spinning",
+                    timeout=0.5,
+                )
+                if not spin:
+                    return
+            except Exception:
+                return
+            time.sleep(0.5)
+        logger.info("剧集链接组件加载等待超时，继续后续步骤")
+
+    def _confirm_native_drama_dialog(self, page: ChromiumPage) -> bool:
+        """点击剧集弹层底部的「添加」按钮（通过 dialog 标题定位，不检查可见性）。
+
+        Returns:
+            bool: 成功点击返回 True，超时未点击返回 False。
+        """
         btn_selectors = (
             "xpath://h3[contains(.,'视频号剧集')]"
             "/ancestor::div[contains(@class,'weui-desktop-dialog')]//button[contains(@class,'weui-desktop-btn_primary')]",
             "xpath://h3[contains(.,'选择需要关联')]"
             "/ancestor::div[contains(@class,'weui-desktop-dialog')]//button[contains(@class,'weui-desktop-btn_primary')]",
         )
-        for sel in btn_selectors:
-            try:
-                btn = page.ele(sel, timeout=2)
-                if not btn:
+        # 选中剧集行后按钮可能短暂处于 disabled 状态，循环等待最多 8 秒
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            for sel in btn_selectors:
+                try:
+                    btn = page.ele(sel, timeout=1)
+                    if not btn:
+                        continue
+                    tx = (btn.text or "").strip()
+                    # 宽松匹配：包含关键词即可，防止按钮文本有前后缀
+                    if not any(kw in tx for kw in ("确定", "确认", "添加")):
+                        continue
+                    cls = btn.attr("class") or ""
+                    if isinstance(cls, str) and "disabled" in cls:
+                        # 按钮暂时禁用，等下一轮
+                        break
+                    self._scroll_click_element(page, btn)
+                    logger.info(f"已点击剧集弹层按钮: {tx}")
+                    return True
+                except Exception:
                     continue
-                tx = (btn.text or "").strip()
-                if tx not in ("确定", "确认", "添加"):
-                    continue
-                cls = btn.attr("class") or ""
-                if isinstance(cls, str) and "disabled" in cls:
-                    continue
-                self._scroll_click_element(page, btn)
-                logger.info(f"已点击剧集弹层按钮: {tx}")
-                return
-            except Exception:
-                continue
+            time.sleep(0.4)
+        logger.warning("未能点击剧集弹层确认按钮（超时 8 秒）")
+        return False
 
     def _check_browser_alive(self, page: ChromiumPage) -> None:
         """检测浏览器是否已关闭，若已关闭则抛出异常。"""
@@ -1576,7 +1622,15 @@ class Uploader:
                 disp = query or "（首条结果）"
                 logger.info(f"已选择剧集: {disp}")
                 self._random_delay(0.35, 0.6)
-                self._confirm_native_drama_dialog(page)
+                if not self._confirm_native_drama_dialog(page):
+                    # 部分微信版本点选行后弹层自动关闭，无需再点确认按钮。
+                    # 此时弹层已消失、剧集已挂载，但确认函数会超时返回 False，
+                    # 用主页面组件内容做兜底判断，避免将已成功的挂载误判为失败。
+                    if self._is_drama_link_mounted(page):
+                        logger.info(f"弹层确认按钮未触发，但剧集链接已出现在主页面，视为挂载成功")
+                    else:
+                        logger.warning(f"剧集「{disp}」已选中但弹层确认失败，剧集链接挂载失败")
+                        return False
                 return True
 
             time.sleep(0.45)
@@ -1686,6 +1740,9 @@ class Uploader:
             if not self._search_and_select_native_drama(page, drama_name):
                 return False
 
+            # 剧集挂载后，组件会发起网络请求加载剧集预览数据，期间发表按钮可能仍 disabled。
+            # 等组件 loading 消失后再继续，避免后续流程误判发表按钮状态。
+            self._wait_for_drama_link_loaded(page)
             logger.info(f"剧集链接流程已完成: {drama_name or '(首条结果)'}")
             return True
 

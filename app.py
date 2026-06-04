@@ -1884,6 +1884,14 @@ async def weixin_delete_schedule(schedule_id: int) -> Dict[str, Any]:
 
 # ---- 系统信息 ----
 
+@app.get("/api/logs")
+async def get_app_logs(since: int = 0, limit: int = 100) -> Dict[str, Any]:
+    """返回进程内最新日志条目，供前端实时展示（不写 DB，仅内存缓冲区）。"""
+    from src.core.logger import get_log_entries
+    entries = get_log_entries(since_id=since, limit=min(limit, 200))
+    return {"status": "success", "entries": entries}
+
+
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     """轻量探活，供桌面版启动时检测服务是否就绪（不访问数据库）。"""
