@@ -507,6 +507,18 @@
     const API_ROOT = `${window.location.origin}/api`;
     const API = `${API_ROOT}/weixin`;
     const getDesktopApi = () => window.pywebview?.api;
+    const getErrorMessage = (error) => {
+        if (!error) return '未知错误';
+        if (typeof error === 'string') return error;
+        if (error.detail) return getErrorMessage(error.detail);
+        if (error.message) return getErrorMessage(error.message);
+        if (error.error) return getErrorMessage(error.error);
+        try {
+            return JSON.stringify(error);
+        } catch (_) {
+            return String(error);
+        }
+    };
 
     createApp({
         setup() {
@@ -746,15 +758,23 @@
                 try {
                     const desktopApi = getDesktopApi();
                     if (desktopApi?.browseFiles) {
-                        const result = await desktopApi.browseFiles();
-                        if (result.status === 'success' && result.paths) {
+                        let result = null;
+                        try {
+                            result = await desktopApi.browseFiles();
+                        } catch (desktopError) {
+                            console.warn('Desktop file dialog failed, falling back to backend API:', desktopError);
+                        }
+                        if (result?.status === 'success' && result.paths) {
                             for (const p of result.paths) {
                                 if (!batchForm.videoFiles.includes(p)) {
                                     batchForm.videoFiles.push(p);
                                 }
                             }
+                            return;
                         }
-                        return;
+                        if (result && result.status !== 'error') {
+                            return;
+                        }
                     }
                     const res = await axios.get(`${API_ROOT}/browse-files`);
                     if (res.data.status === 'success' && res.data.paths) {
@@ -764,7 +784,7 @@
                             }
                         }
                     }
-                } catch (e) { showMessage('选择文件失败: ' + (e.message || e), 'error'); }
+                } catch (e) { showMessage('选择文件失败: ' + getErrorMessage(e.response?.data || e), 'error'); }
                 finally { isBrowsingBatchFiles.value = false; }
             }
 

@@ -32,6 +32,15 @@ def get_log_entries(since_id: int = 0, limit: int = 100) -> List[Dict]:
     return entries[-limit:]
 
 
+def clear_log_entries() -> int:
+    """清空进程内日志缓冲区，返回清空条数。"""
+    with _log_lock:
+        count = len(_log_buffer)
+        _log_buffer.clear()
+        _log_seq[0] += 1
+    return count
+
+
 class Logger:
     """日志记录器"""
 

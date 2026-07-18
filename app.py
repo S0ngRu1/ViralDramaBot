@@ -15,6 +15,8 @@ import sys
 import asyncio
 import os
 import time
+import shutil
+import uuid
 
 
 import platform
@@ -56,6 +58,13 @@ project_root = get_project_root()
 # 添加 src 目录到 Python 路径
 sys.path.insert(0, str(project_root))
 
+# 统一数据目录：开发版、安装版、后台模块全部只使用 AppData\Roaming\ViralDramaBot。
+# 必须在导入 WeixinConfig / WeixinDAO 之前设置 WORK_DIR，否则微信模块会落到旧默认路径。
+APPDATA_ROOT = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+DATA_DIR = APPDATA_ROOT / "ViralDramaBot"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+os.environ["WORK_DIR"] = str(DATA_DIR)
+
 from src.ingestion.douyin import get_downloader, DouyinDownloader
 from src.publishing.weixin.config import WeixinConfig
 from src.publishing.weixin.dao import WeixinDAO
@@ -83,20 +92,8 @@ from src.publishing.weixin.schemas import (
     FavoriteLocationCreate,
 )
 
-# ===== 新增：数据目录自动适配 =====
-if getattr(sys, 'frozen', False):
-    # 打包后 → 使用系统 AppData 目录（对用户不可见）
-    DATA_DIR = Path(os.getenv("APPDATA")) / "ViralDramaBot"
-else:
-    # 开发环境 → 默认项目根目录下的 .data；
-    # 但允许通过 WORK_DIR 环境变量覆盖（例如 start-web.bat 指向 %APPDATA%\ViralDramaBot，
-    # 使开发启动与打包版桌面软件共用同一份账号/数据库）
-    _env_work_dir = os.getenv("WORK_DIR")
-    DATA_DIR = Path(_env_work_dir) if _env_work_dir else (project_root / ".data")
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-# 打包/桌面版在 import 微信等模块前写入 WORK_DIR，避免落到 ~/.viraldramabot_data
-os.environ["WORK_DIR"] = str(DATA_DIR)
+# ===== 统一数据目录 =====
+# DATA_DIR 已在导入微信模块前固定为 %APPDATA%\ViralDramaBot，禁止回退到项目 .data 或 ~/.viraldramabot_data。
 
 # 数据目录路径
 VIDEO_METADATA_DIR = DATA_DIR / "metadata"
@@ -145,6 +142,9 @@ def _migrate_legacy_weixin_accounts() -> None:
     from src.publishing.weixin.config import WeixinConfig as _WC
     new_db = Path(_WC.DB_PATH)
     new_cookies = Path(_WC.COOKIES_DIR)
+    marker = new_db.parent / ".legacy_accounts_migrated"
+    if marker.exists():
+        return
     if not new_db.exists():
         return
     try:
@@ -152,6 +152,16 @@ def _migrate_legacy_weixin_accounts() -> None:
         old.row_factory = sqlite3.Row
         new = sqlite3.connect(new_db)
         new.row_factory = sqlite3.Row
+        existing_count = new.execute("SELECT COUNT(*) AS cnt FROM accounts").fetchone()["cnt"]
+        if existing_count:
+            marker.write_text(
+                f"skipped because destination already has {existing_count} account(s)\n",
+                encoding="utf-8",
+            )
+            old.close()
+            new.close()
+            logger.info("已检测到当前账号库已有账号，跳过旧路径账号迁移: %s", old_db.parent)
+            return
         old_accounts = old.execute("SELECT * FROM accounts").fetchall()
         migrated = 0
         for acc in old_accounts:
@@ -173,6 +183,7 @@ def _migrate_legacy_weixin_accounts() -> None:
             )
             migrated += 1
         new.commit()
+        marker.write_text(f"migrated {migrated} account(s)\n", encoding="utf-8")
         old.close()
         new.close()
         if migrated:
@@ -181,7 +192,8 @@ def _migrate_legacy_weixin_accounts() -> None:
         logger.warning("⚠️ 旧账号迁移失败（不影响运行）: %s", exc)
 
 
-_migrate_legacy_weixin_accounts()
+# 用户要求只使用 %APPDATA%\ViralDramaBot\weixin\weixin.db。
+# 旧路径账号迁移停用，避免 .data / ~/.viraldramabot_data 的账号再次写回当前库。
 
 
 # 创建 FastAPI 应用
@@ -344,6 +356,24 @@ class BatchDeleteRequest(BaseModel):
     video_ids: List[str]
 
 
+class CleanupRequest(BaseModel):
+    """维护清理请求。默认不删除账号、Cookie 或本地视频文件。"""
+    logs: bool = True
+    cache: bool = True
+    upload_history: bool = True
+
+
+class EmbeddedBrowserInput(BaseModel):
+    """桌面端内嵌视频号浏览器的输入事件。"""
+    type: str
+    x_ratio: float = 0.5
+    y_ratio: float = 0.5
+    delta_x: float = 0
+    delta_y: float = 0
+    key: str = ""
+    code: str = ""
+
+
 # ============================================================================
 # 全局变量（用于存储下载进度）
 # ============================================================================
@@ -351,6 +381,8 @@ class BatchDeleteRequest(BaseModel):
 download_status: Dict[str, DownloadProgress] = {}
 repair_task: Optional[asyncio.Task] = None
 download_status_lock = Lock()
+embedded_login_sessions: Dict[str, Dict[str, Any]] = {}
+embedded_login_lock = Lock()
 
 # 视频号模块初始化
 weixin_dao = WeixinDAO()
@@ -1130,9 +1162,9 @@ def _win_file_dialog(title: str, multi: bool = True) -> list:
             ("lpstrCustomFilter", ctypes.c_wchar_p),
             ("nMaxCustFilter",    wt.DWORD),
             ("nFilterIndex",      wt.DWORD),
-            ("lpstrFile",         ctypes.c_wchar_p),
+            ("lpstrFile",         ctypes.POINTER(ctypes.c_wchar)),
             ("nMaxFile",          wt.DWORD),
-            ("lpstrFileTitle",    ctypes.c_wchar_p),
+            ("lpstrFileTitle",    ctypes.POINTER(ctypes.c_wchar)),
             ("nMaxFileTitle",     wt.DWORD),
             ("lpstrInitialDir",   ctypes.c_wchar_p),
             ("lpstrTitle",        ctypes.c_wchar_p),
@@ -1155,7 +1187,7 @@ def _win_file_dialog(title: str, multi: bool = True) -> list:
     ofn.lStructSize  = ctypes.sizeof(OFN)
     ofn.lpstrFilter  = "视频文件\0*.mp4;*.avi;*.mov;*.mkv;*.flv;*.wmv\0所有文件\0*.*\0\0"
     ofn.nFilterIndex = 1
-    ofn.lpstrFile    = buf
+    ofn.lpstrFile    = ctypes.cast(buf, ctypes.POINTER(ctypes.c_wchar))
     ofn.nMaxFile     = BUF_SIZE
     ofn.lpstrTitle   = title
     ofn.Flags        = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY
@@ -1163,6 +1195,9 @@ def _win_file_dialog(title: str, multi: bool = True) -> list:
         ofn.Flags |= OFN_ALLOWMULTISELECT
 
     if not ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
+        err = ctypes.windll.comdlg32.CommDlgExtendedError()
+        if err:
+            raise RuntimeError(f"Windows 文件选择器打开失败，错误码: 0x{err:04X}")
         return []
 
     # 缓冲区格式：单文件=完整路径\0；多文件=目录\0文件名1\0文件名2\0\0
@@ -1199,7 +1234,7 @@ def _win_dir_dialog(title: str) -> str:
         _fields_ = [
             ("hwndOwner",      wt.HWND),
             ("pidlRoot",       ctypes.c_void_p),
-            ("pszDisplayName", ctypes.c_wchar_p),
+            ("pszDisplayName", ctypes.POINTER(ctypes.c_wchar)),
             ("lpszTitle",      ctypes.c_wchar_p),
             ("ulFlags",        wt.UINT),
             ("lpfn",           ctypes.c_void_p),
@@ -1209,7 +1244,7 @@ def _win_dir_dialog(title: str) -> str:
 
     disp = ctypes.create_unicode_buffer(260)
     bi = BROWSEINFOW()
-    bi.pszDisplayName = disp
+    bi.pszDisplayName = ctypes.cast(disp, ctypes.POINTER(ctypes.c_wchar))
     bi.lpszTitle      = title
     bi.ulFlags        = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX
 
@@ -1594,6 +1629,248 @@ async def weixin_login_account(account_id: int, background_tasks: BackgroundTask
     return {"status": "started", "message": "扫码登录已启动，请在弹出的浏览器窗口中扫码"}
 
 
+def _capture_login_qr_base64(page) -> Optional[str]:
+    """截取视频号登录页当前可见区域，用于在桌面应用内完整呈现。"""
+    try:
+        return page.get_screenshot(as_base64=True, full_page=False)
+    except Exception:
+        return None
+
+
+def _run_embedded_login(session_id: str, account_id: int) -> None:
+    account = weixin_account_mgr.get_account(account_id)
+    if not account:
+        with embedded_login_lock:
+            embedded_login_sessions[session_id]["status"] = "error"
+            embedded_login_sessions[session_id]["message"] = "账号不存在"
+        return
+
+    page = None
+    login_profile_dir = None
+    page_lock = Lock()
+    cookie_path = account["cookie_path"]
+    authenticated = False
+    cookies_saved = False
+    try:
+        page, login_profile_dir = weixin_account_mgr._create_qrcode_login_browser(cookie_path, headless=True)
+        with embedded_login_lock:
+            embedded_login_sessions[session_id]["page"] = page
+            embedded_login_sessions[session_id]["page_lock"] = page_lock
+            embedded_login_sessions[session_id]["profile_dir"] = login_profile_dir
+            embedded_login_sessions[session_id]["status"] = "loading"
+            embedded_login_sessions[session_id]["message"] = "正在加载视频号页面..."
+
+        # 已登录账号恢复 Cookie 后直接进入后台；其他账号进入登录页。
+        if account.get("status") == AccountStatus.ACTIVE.value and Path(cookie_path).exists():
+            with page_lock:
+                weixin_account_mgr._load_cookies(page, cookie_path)
+                # `/platform` 根路径在部分账号上会错误重定向回登录页；作品列表
+                # 是项目现有 Cookie 校验使用的稳定入口，进入后可正常操作整个后台。
+                page.get(WeixinConfig.POST_LIST_URL)
+            time.sleep(2)
+            with page_lock:
+                authenticated = weixin_account_mgr._check_login_status(page)["success"]
+
+        if not authenticated:
+            weixin_dao.update_account_status(account_id, AccountStatus.LOGGING_IN)
+            with page_lock:
+                page.get(WeixinConfig.LOGIN_URL)
+            time.sleep(2)
+            with page_lock:
+                weixin_account_mgr._switch_to_qrcode_login(page)
+
+        start_time = time.time()
+        closed_count = 0
+        while True:
+            with embedded_login_lock:
+                if embedded_login_sessions.get(session_id, {}).get("cancelled"):
+                    latest_account = weixin_dao.get_account(account_id)
+                    if latest_account and latest_account.get("status") == AccountStatus.LOGGING_IN.value:
+                        weixin_dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                    embedded_login_sessions[session_id]["status"] = "cancelled"
+                    embedded_login_sessions[session_id]["message"] = "页面已关闭"
+                    return
+
+            with page_lock:
+                result = weixin_account_mgr._check_login_status(page)
+                current_url = str(page.url or "")
+
+            if result["error"] and "浏览器已关闭" in result["error"]:
+                closed_count += 1
+                if closed_count < 3:
+                    time.sleep(1)
+                    continue
+                with embedded_login_lock:
+                    embedded_login_sessions[session_id]["status"] = "failed"
+                    embedded_login_sessions[session_id]["message"] = result["error"]
+                return
+            closed_count = 0
+
+            is_platform = result["success"] or "/platform" in current_url
+            if is_platform:
+                authenticated = True
+                if not cookies_saved:
+                    with page_lock:
+                        weixin_account_mgr._save_cookies(page, cookie_path)
+                        wechat_id = weixin_account_mgr._extract_wechat_id(page)
+                    weixin_dao.update_account_status(account_id, AccountStatus.ACTIVE, wechat_id)
+                    cookies_saved = True
+                status = "active"
+                message = "视频号助手"
+            else:
+                if authenticated:
+                    authenticated = False
+                    cookies_saved = False
+                    weixin_dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                status = "waiting"
+                message = result["error"] or "请使用微信扫码登录"
+
+            with page_lock:
+                frame = _capture_login_qr_base64(page)
+            with embedded_login_lock:
+                session = embedded_login_sessions.get(session_id)
+                if session:
+                    session["status"] = status
+                    session["message"] = message
+                    session["qr"] = frame
+                    session["url"] = current_url
+                    session["elapsed"] = int(time.time() - start_time)
+                    if authenticated:
+                        session["account"] = weixin_dao.get_account(account_id)
+            time.sleep(1)
+
+    except Exception as e:
+        logger.error(f"应用内登录失败: {e}")
+        weixin_dao.update_account_status(account_id, AccountStatus.ERROR)
+        with embedded_login_lock:
+            if session_id in embedded_login_sessions:
+                embedded_login_sessions[session_id]["status"] = "error"
+                embedded_login_sessions[session_id]["message"] = str(e)
+    finally:
+        if page:
+            try:
+                page.quit()
+            except Exception:
+                pass
+        if login_profile_dir:
+            shutil.rmtree(login_profile_dir, ignore_errors=True)
+        with embedded_login_lock:
+            if session_id in embedded_login_sessions:
+                embedded_login_sessions[session_id]["page"] = None
+                embedded_login_sessions[session_id]["page_lock"] = None
+                embedded_login_sessions[session_id]["profile_dir"] = None
+
+
+@app.post("/api/weixin/accounts/{account_id}/login-embedded")
+async def weixin_login_account_embedded(account_id: int) -> Dict[str, Any]:
+    """启动账号浏览器：未登录显示登录页，已登录直接显示视频号后台。"""
+    account = weixin_account_mgr.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    session_id = uuid.uuid4().hex
+    with embedded_login_lock:
+        for old_session in embedded_login_sessions.values():
+            if old_session.get("account_id") == account_id and old_session.get("page"):
+                old_session["cancelled"] = True
+        embedded_login_sessions[session_id] = {
+            "session_id": session_id,
+            "account_id": account_id,
+            "status": "starting",
+            "message": "正在启动应用内登录...",
+            "qr": None,
+            "url": WeixinConfig.LOGIN_URL,
+            "elapsed": 0,
+            "cancelled": False,
+            "page": None,
+            "page_lock": None,
+            "profile_dir": None,
+        }
+
+    Thread(target=_run_embedded_login, args=(session_id, account_id), daemon=True).start()
+    return {"status": "started", "session_id": session_id, "message": "应用内登录已启动"}
+
+
+@app.get("/api/weixin/login-sessions/{session_id}")
+async def weixin_get_login_session(session_id: str) -> Dict[str, Any]:
+    with embedded_login_lock:
+        session = embedded_login_sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="登录会话不存在")
+        public = {k: v for k, v in session.items() if k not in {"page", "page_lock", "profile_dir"}}
+    return {"status": "success", "session": public}
+
+
+@app.post("/api/weixin/login-sessions/{session_id}/input")
+async def weixin_embedded_browser_input(session_id: str, payload: EmbeddedBrowserInput) -> Dict[str, Any]:
+    """把桌面工作区里的鼠标、滚轮和键盘事件转发给 Chromium。"""
+    with embedded_login_lock:
+        session = embedded_login_sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="浏览器会话不存在")
+        page = session.get("page")
+        page_lock = session.get("page_lock")
+    if not page or not page_lock:
+        raise HTTPException(status_code=409, detail="浏览器页面尚未就绪")
+
+    event_type = payload.type.lower()
+    x_ratio = max(0.0, min(1.0, payload.x_ratio))
+    y_ratio = max(0.0, min(1.0, payload.y_ratio))
+    try:
+        with page_lock:
+            viewport = page.rect.viewport_size
+            x = round(viewport[0] * x_ratio)
+            y = round(viewport[1] * y_ratio)
+            if event_type == "click":
+                page.run_cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button="left", clickCount=1)
+                page.run_cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button="left", clickCount=1)
+            elif event_type == "wheel":
+                page.run_cdp(
+                    "Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y,
+                    deltaX=payload.delta_x, deltaY=payload.delta_y,
+                )
+            elif event_type == "key":
+                special_codes = {
+                    "Enter": 13, "Backspace": 8, "Tab": 9, "Escape": 27,
+                    "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39,
+                    "ArrowDown": 40, "Delete": 46,
+                }
+                key_args: Dict[str, Any] = {"key": payload.key, "code": payload.code or payload.key}
+                if len(payload.key) == 1:
+                    key_args["text"] = payload.key
+                if payload.key in special_codes:
+                    key_args["windowsVirtualKeyCode"] = special_codes[payload.key]
+                page.run_cdp("Input.dispatchKeyEvent", type="keyDown", **key_args)
+                page.run_cdp("Input.dispatchKeyEvent", type="keyUp", **key_args)
+            elif event_type == "reload":
+                page.refresh()
+            elif event_type == "back":
+                page.back()
+            else:
+                raise HTTPException(status_code=400, detail="不支持的浏览器操作")
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"浏览器操作失败: {exc}")
+
+
+@app.post("/api/weixin/login-sessions/{session_id}/cancel")
+async def weixin_cancel_login_session(session_id: str) -> Dict[str, Any]:
+    with embedded_login_lock:
+        session = embedded_login_sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="登录会话不存在")
+        session["cancelled"] = True
+        page = session.get("page")
+    if page:
+        try:
+            page.quit()
+        except Exception:
+            pass
+    return {"status": "success", "message": "已取消登录"}
+
+
 @app.post("/api/weixin/accounts/{account_id}/refresh")
 async def weixin_refresh_account(account_id: int) -> Dict[str, Any]:
     """刷新账号登录状态"""
@@ -1965,6 +2242,113 @@ async def get_app_logs(since: int = 0, limit: int = 100) -> Dict[str, Any]:
     return {"status": "success", "entries": entries}
 
 
+def _truncate_logging_files() -> List[str]:
+    """清空当前进程已打开的 FileHandler 日志文件，兼容 Windows 文件锁。"""
+    import logging as _logging
+
+    cleared: List[str] = []
+    seen: set[str] = set()
+    for logger_name in ("", "ViralDramaBot.app", "ViralDramaBot 运营工作台"):
+        target_logger = _logging.getLogger(logger_name)
+        for handler in list(target_logger.handlers):
+            base_filename = getattr(handler, "baseFilename", None)
+            if not base_filename or base_filename in seen:
+                continue
+            seen.add(base_filename)
+            try:
+                handler.acquire()
+                try:
+                    if getattr(handler, "stream", None):
+                        handler.stream.seek(0)
+                        handler.stream.truncate(0)
+                        handler.flush()
+                    else:
+                        Path(base_filename).write_text("", encoding="utf-8")
+                finally:
+                    handler.release()
+                cleared.append(base_filename)
+            except Exception as exc:
+                logger.warning("清空日志文件失败 %s: %s", base_filename, exc)
+
+    fallback = DATA_DIR / "logs" / "app.log"
+    if str(fallback) not in seen and fallback.exists():
+        fallback.write_text("", encoding="utf-8")
+        cleared.append(str(fallback))
+    return cleared
+
+
+def _clear_runtime_cache() -> Dict[str, Any]:
+    """清理运行缓存：代理检测缓存、临时浏览器 profile、视频索引缓存。"""
+    removed_paths: List[str] = []
+    removed_video_index_rows = 0
+
+    invalidate_proxy_check_cache()
+
+    cache_targets = [
+        WeixinConfig.COOKIES_DIR / "login_profiles",
+        WeixinConfig.COOKIES_DIR / "viewer",
+    ]
+    if WeixinConfig.COOKIES_DIR.exists():
+        cache_targets.extend(
+            p for p in WeixinConfig.COOKIES_DIR.iterdir()
+            if p.is_dir() and p.name.startswith("profile_")
+        )
+
+    for target in cache_targets:
+        try:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+                removed_paths.append(str(target))
+        except Exception as exc:
+            logger.warning("清理缓存目录失败 %s: %s", target, exc)
+
+    ensure_video_index_storage()
+    with get_index_connection() as conn:
+        cursor = conn.execute("DELETE FROM videos")
+        removed_video_index_rows = cursor.rowcount if cursor.rowcount is not None else 0
+        conn.commit()
+
+    return {
+        "removed_paths": removed_paths,
+        "video_index_rows": removed_video_index_rows,
+    }
+
+
+@app.post("/api/maintenance/cleanup")
+async def cleanup_maintenance(request: CleanupRequest) -> Dict[str, Any]:
+    """
+    清除日志、运行缓存、历史视频上传记录。
+
+    不删除账号、不删除账号 Cookie JSON、不删除已下载视频文件。
+    上传中的任务会被保留。
+    """
+    result: Dict[str, Any] = {
+        "logs": None,
+        "cache": None,
+        "upload_history": None,
+    }
+
+    if request.logs:
+        from src.core.logger import clear_log_entries
+        memory_count = clear_log_entries()
+        files = _truncate_logging_files()
+        result["logs"] = {"memory_entries": memory_count, "files": files}
+
+    if request.cache:
+        result["cache"] = _clear_runtime_cache()
+
+    if request.upload_history:
+        result["upload_history"] = weixin_dao.clear_upload_history()
+
+    logger.info(
+        "维护清理完成：logs=%s cache=%s upload_history=%s",
+        bool(request.logs),
+        bool(request.cache),
+        bool(request.upload_history),
+    )
+    return {"status": "success", "result": result}
+
+
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     """轻量探活，供桌面版启动时检测服务是否就绪（不访问数据库）。"""
@@ -2003,6 +2387,54 @@ async def get_status() -> Dict[str, Any]:
 # ============================================================================
 # 启动脚本
 # ============================================================================
+
+@app.get("/api/dashboard")
+async def get_dashboard() -> Dict[str, Any]:
+    """聚合运营工作台首页所需的下载、素材、账号、任务、代理和日志概览。"""
+    try:
+        videos = get_video_list()
+        accounts = weixin_account_mgr.get_all_accounts()
+        tasks = weixin_dao.get_tasks()
+        proxies = weixin_dao.list_proxy_profiles()
+        queue = batch_upload_queue.snapshot()
+        from src.core.logger import get_log_entries
+
+        def count_by(items, key):
+            stats: Dict[str, int] = {}
+            for item in items:
+                value = item.get(key) or "unknown"
+                stats[value] = stats.get(value, 0) + 1
+            return stats
+
+        failed_tasks = [t for t in tasks if t.get("status") == TaskStatus.FAILED.value]
+        return {
+            "status": "success",
+            "download": download_status.get("current") if download_status else build_progress(
+                status="idle",
+                percentage=0,
+                downloaded=0,
+                total=0,
+                message="就绪",
+                file_path=str(Path(config.work_dir).resolve()),
+            ),
+            "videos": {"total": len(videos), "recent": videos[:5]},
+            "accounts": {"total": len(accounts), "by_status": count_by(accounts, "status")},
+            "tasks": {
+                "total": len(tasks),
+                "by_status": count_by(tasks, "status"),
+                "failed_recent": failed_tasks[:5],
+            },
+            "queue": queue,
+            "proxies": {
+                "total": len(proxies),
+                "enabled": len([p for p in proxies if p.get("enabled")]),
+            },
+            "logs": get_log_entries(limit=8),
+        }
+    except Exception as e:
+        logger.error(f"获取工作台概览失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn
