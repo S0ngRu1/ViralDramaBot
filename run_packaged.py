@@ -90,9 +90,11 @@ class DesktopApi:
                 ]
                 cookie_path.parent.mkdir(parents=True, exist_ok=True)
                 cookie_path.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
-                from app import weixin_dao
+                from app import weixin_dao, weixin_account_mgr
                 from src.publishing.weixin.schemas import AccountStatus
                 weixin_dao.update_account_status(account_id, AccountStatus.ACTIVE)
+                # Cookie 落盘后走 auth_data 拉取昵称/头像（不依赖首页 DOM 是否已渲染）
+                weixin_account_mgr.extract_and_save_profile(account_id, page=None)
             except Exception:
                 logging.getLogger(APP_NAME).exception("保存原生视频号浏览器 Cookie 失败")
 

@@ -144,14 +144,16 @@
                     <div class="card">
                         <div class="flex justify-between items-center" style="margin-bottom: 16px;">
                             <h3>视频号账号</h3>
-                            <button class="btn btn-primary" @click="showAddAccount = true">+ 添加账号</button>
+                            <button class="btn btn-primary" @click="addAccount" :disabled="addingAccount">
+                                {{ addingAccount ? '添加中...' : '+ 添加账号' }}
+                            </button>
                         </div>
                         <table class="table" v-if="accounts.length">
                             <thead>
                                 <tr>
                                     <th>ID</th>
-                                    <th>名称</th>
-                                    <th>微信ID</th>
+                                    <th>账号</th>
+                                    <th>视频号ID</th>
                                     <th>状态</th>
                                     <th>备注</th>
                                     <th>创建时间</th>
@@ -161,7 +163,15 @@
                             <tbody>
                                 <tr v-for="acc in accounts" :key="acc.id">
                                     <td>{{ acc.id }}</td>
-                                    <td>{{ acc.name }}</td>
+                                    <td>
+                                        <div style="display:flex;align-items:center;gap:8px;">
+                                            <span class="account-avatar" style="width:28px;height:28px;border-radius:8px;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;background:#e8f0ee;font-size:12px;">
+                                                <img v-if="acc.avatar_url" :src="acc.avatar_url" :alt="acc.name" style="width:100%;height:100%;object-fit:cover;" />
+                                                <template v-else>{{ (acc.name || '?').slice(0, 1).toUpperCase() }}</template>
+                                            </span>
+                                            <span>{{ acc.name }}</span>
+                                        </div>
+                                    </td>
                                     <td>{{ acc.wechat_id || '-' }}</td>
                                     <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
                                     <td>
@@ -480,23 +490,8 @@
             </div>
         </div>
 
-        <!-- 添加账号弹窗 -->
-        <div v-if="showAddAccount" class="modal-overlay" @click.self="showAddAccount = false">
-            <div class="modal">
-                <h3>添加视频号账号</h3>
-                <div class="form-group">
-                    <label>账号名称</label>
-                    <input v-model="newAccountName" placeholder="给账号起个名字，如：我的视频号1">
-                </div>
-                <p style="color: #666; font-size: 13px; margin-top: 8px;">
-                    创建后需要扫码登录才能使用。每个账号需要在微信中扫码确认。
-                </p>
-                <div class="modal-actions">
-                    <button class="btn" @click="showAddAccount = false">取消</button>
-                    <button class="btn btn-primary" @click="addAccount" :disabled="!newAccountName">创建并登录</button>
-                </div>
-            </div>
-        </div>
+        <!-- 添加账号：点击按钮直接创建并跳转扫码，不再弹出名称输入 -->
+        <div v-if="false" class="modal-overlay"></div>
     </div>
 
     <script>
@@ -529,6 +524,7 @@
             const schedules = ref([]);
             const showAddAccount = ref(false);
             const newAccountName = ref('');
+            const addingAccount = ref(false);
             const refreshingIds = ref(new Set());
             const isBrowsingUploadFile = ref(false);
             const isBrowsingBatchFiles = ref(false);
@@ -690,13 +686,21 @@
             }
 
             async function addAccount() {
+                if (addingAccount.value) return;
+                addingAccount.value = true;
                 try {
-                    await axios.post(`${API}/accounts`, { name: newAccountName.value });
-                    showAddAccount.value = false;
-                    newAccountName.value = '';
+                    const res = await axios.post(`${API}/accounts`, {});
                     await loadAccounts();
-                    showMessage('账号已创建，请点击"扫码登录"', 'success');
-                } catch (e) { showMessage('创建失败: ' + (e.response?.data?.detail || e.message), 'error'); }
+                    const account = res.data.account || accounts.value[0];
+                    showMessage('账号已创建，请扫码登录', 'success');
+                    if (account) {
+                        await loginAccount(account.id);
+                    }
+                } catch (e) {
+                    showMessage('创建失败: ' + (e.response?.data?.detail || e.message), 'error');
+                } finally {
+                    addingAccount.value = false;
+                }
             }
             async function loginAccount(id) {
                 try {
@@ -880,7 +884,7 @@
             onMounted(() => { loadAccounts(); loadSchedules(); });
 
             return {
-                tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, message, refreshingIds,
+                tab, accounts, tasks, selectedTaskIds, schedules, showAddAccount, newAccountName, addingAccount, message, refreshingIds,
                 isBrowsingUploadFile, isBrowsingBatchFiles,
                 uploadForm, batchForm, scheduleForm,
                 formatDate, getFileName, getAccountName,

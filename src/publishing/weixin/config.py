@@ -14,6 +14,9 @@ class WeixinConfig:
     POST_CREATE_URL = f"{CHANNELS_URL}/platform/post/create"
     POST_LIST_URL = f"{CHANNELS_URL}/platform/post/list"
     LOGIN_URL = f"{CHANNELS_URL}/login.html?from=assistant"
+    # 登录后拉取视频号资料（昵称 / 头像 / uniqId）
+    AUTH_DATA_URL = f"{CHANNELS_URL}/cgi-bin/mmfinderassistant-bin/auth/auth_data"
+    DEFAULT_ACCOUNT_NAME = "未命名账号"
 
     # 数据目录：唯一使用 %APPDATA%\ViralDramaBot\weixin。
     # WORK_DIR 由 app.py / run_packaged.py 在启动早期固定；即使单独导入本模块，也默认落到 AppData，

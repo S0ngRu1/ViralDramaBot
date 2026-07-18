@@ -36,8 +36,8 @@ class MetadataSource(str, Enum):
 
 
 class AccountCreate(BaseModel):
-    """创建账号请求"""
-    name: str = Field(..., min_length=1, max_length=50, description="账号名称")
+    """创建账号请求。名称可选：缺省时后端使用占位名，登录后自动回写视频号昵称。"""
+    name: Optional[str] = Field(None, min_length=1, max_length=50, description="账号名称（可选）")
 
 
 class AccountInfo(BaseModel):
@@ -45,6 +45,7 @@ class AccountInfo(BaseModel):
     id: int
     name: str
     wechat_id: Optional[str] = None
+    avatar_url: Optional[str] = None
     status: AccountStatus
     created_at: datetime
     last_login_at: Optional[datetime] = None

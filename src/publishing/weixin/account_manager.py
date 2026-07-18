@@ -65,14 +65,14 @@ class AccountManager:
     def __init__(self, dao: Optional[WeixinDAO] = None):
         self.dao = dao or WeixinDAO()
 
-    def create_account(self, name: str) -> dict:
-        """创建新账号（触发扫码登录流程）"""
+    def create_account(self, name: Optional[str] = None) -> dict:
+        """创建新账号（名称可选，登录后自动回写视频号昵称）"""
         if self.dao.get_account_count() >= WeixinConfig.MAX_ACCOUNTS:
             raise ValueError(f"已达到最大账号数限制 ({WeixinConfig.MAX_ACCOUNTS})")
 
         account_id = self.dao.create_account(name)
         account = self.dao.get_account(account_id)
-        logger.info(f"账号已创建: {name} (ID: {account_id})")
+        logger.info(f"账号已创建: {account['name']} (ID: {account_id})")
         return account
 
     def login_with_qrcode(self, account_id: int) -> dict:
@@ -110,11 +110,8 @@ class AccountManager:
 
             if login_result["success"]:
                 self._save_cookies(page, cookie_path)
-                # 尝试获取微信昵称
-                wechat_id = self._extract_wechat_id(page)
-                self.dao.update_account_status(
-                    account_id, AccountStatus.ACTIVE, wechat_id
-                )
+                self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
+                self.extract_and_save_profile(account_id, page=page)
                 logger.info(f"账号登录成功: {account['name']}")
                 return {"status": "success", "message": "登录成功"}
             else:
@@ -541,12 +538,200 @@ class AccountManager:
         logger.info(f"Cookie 已加载: {cookie_path}（{len(cookies)} 条）")
 
     def _extract_wechat_id(self, page: ChromiumPage) -> Optional[str]:
-        """尝试从页面提取微信ID"""
+        """兼容旧调用：从页面提取视频号 uniqId 或昵称。"""
+        profile = self._extract_account_profile_from_dom(page)
+        return profile.get("uniq_id") or profile.get("nickname")
+
+    @staticmethod
+    def parse_auth_data_profile(payload: dict) -> dict:
+        """
+        解析 auth/auth_data 响应，提取展示用资料。
+
+        Returns:
+            dict: {"nickname": str|None, "avatar_url": str|None, "uniq_id": str|None}
+        """
+        empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
+        if not isinstance(payload, dict):
+            return empty
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        finder = data.get("finderUser") if isinstance(data, dict) else None
+        if not isinstance(finder, dict):
+            return empty
+        nickname = (finder.get("nickname") or "").strip() or None
+        avatar_url = (finder.get("headImgUrl") or "").strip() or None
+        uniq_id = (finder.get("uniqId") or "").strip() or None
+        return {"nickname": nickname, "avatar_url": avatar_url, "uniq_id": uniq_id}
+
+    def fetch_account_profile_via_auth_data(self, cookie_path: str) -> dict:
+        """
+        用已保存 Cookie 调用 auth/auth_data，获取视频号昵称与头像。
+
+        Returns:
+            dict: {"nickname": str|None, "avatar_url": str|None, "uniq_id": str|None}
+        """
+        import requests
+
+        empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
+        path = Path(cookie_path)
+        if not path.exists():
+            return empty
         try:
-            elem = page.ele("css:.nickname, .user-name", timeout=5)
-            return elem.text if elem else None
+            cookies_raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"读取 Cookie 失败，无法拉取资料: {e}")
+            return empty
+
+        session = requests.Session()
+        session.trust_env = False
+        for item in cookies_raw:
+            name = item.get("name")
+            value = item.get("value")
+            if not name:
+                continue
+            domain = item.get("domain") or ".weixin.qq.com"
+            session.cookies.set(str(name), str(value), domain=str(domain))
+
+        body = {
+            "timestamp": str(int(time.time() * 1000)),
+            "_log_finder_uin": "",
+            "_log_finder_id": "",
+            "rawKeyBuff": "",
+            "pluginSessionId": None,
+            "scene": 7,
+            "reqScene": 7,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": WeixinConfig.CHANNELS_URL,
+            "Referer": f"{WeixinConfig.CHANNELS_URL}/platform/home",
+        }
+        try:
+            resp = session.post(
+                WeixinConfig.AUTH_DATA_URL,
+                json=body,
+                headers=headers,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            profile = self.parse_auth_data_profile(resp.json())
+            if profile.get("nickname") or profile.get("avatar_url"):
+                logger.info(
+                    f"auth_data 资料提取成功: nickname={profile.get('nickname')}, "
+                    f"uniq_id={profile.get('uniq_id')}"
+                )
+            return profile
+        except Exception as e:
+            logger.warning(f"调用 auth/auth_data 失败: {e}")
+            return empty
+
+    def _extract_account_profile_from_dom(self, page: ChromiumPage) -> dict:
+        """从创作者中心首页 DOM 兜底提取昵称 / 头像 / 视频号 ID。"""
+        empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
+        if page is None:
+            return empty
+        try:
+            result = page.run_js("""
+                (() => {
+                  const root = document.querySelector('.finder-info-container');
+                  const nickEl = (root && root.querySelector('h2.finder-nickname'))
+                    || document.querySelector('h2.finder-nickname')
+                    || document.querySelector('.nickname, .user-name');
+                  const avatarEl = (root && root.querySelector('img.avatar'))
+                    || document.querySelector('img.avatar[alt="视频号头像"]')
+                    || document.querySelector('.finder-info-container img.avatar');
+                  const uidEl = document.querySelector('#finder-uid-copy')
+                    || document.querySelector('.finder-uniq-id');
+                  return {
+                    nickname: nickEl ? (nickEl.innerText || nickEl.textContent || '').trim() : '',
+                    avatar_url: avatarEl ? (avatarEl.getAttribute('src') || '') : '',
+                    uniq_id: uidEl
+                      ? (uidEl.getAttribute('data-clipboard-text')
+                         || (uidEl.innerText || uidEl.textContent || '').trim())
+                      : ''
+                  };
+                })()
+            """)
+            if isinstance(result, dict):
+                return {
+                    "nickname": (result.get("nickname") or "").strip() or None,
+                    "avatar_url": (result.get("avatar_url") or "").strip() or None,
+                    "uniq_id": (result.get("uniq_id") or "").strip() or None,
+                }
+        except Exception as e:
+            logger.debug(f"DOM 资料提取 JS 失败: {e}")
+
+        # JS 不可用时退回元素选择器
+        try:
+            nickname = None
+            for sel in ("css:h2.finder-nickname", "css:.nickname", "css:.user-name"):
+                elem = page.ele(sel, timeout=2)
+                if elem and getattr(elem, "text", None):
+                    nickname = elem.text.strip()
+                    break
+            avatar_url = None
+            for sel in (
+                'css:img.avatar[alt="视频号头像"]',
+                "css:.finder-info-container img.avatar",
+                "css:img.avatar",
+            ):
+                elem = page.ele(sel, timeout=2)
+                if elem:
+                    avatar_url = (
+                        elem.attr("src")
+                        if hasattr(elem, "attr")
+                        else getattr(elem, "src", None)
+                    )
+                    if avatar_url:
+                        break
+            uniq_id = None
+            uid = page.ele("css:#finder-uid-copy", timeout=2) or page.ele(
+                "css:.finder-uniq-id", timeout=2
+            )
+            if uid:
+                uniq_id = (
+                    uid.attr("data-clipboard-text")
+                    if hasattr(uid, "attr")
+                    else None
+                ) or (uid.text.strip() if getattr(uid, "text", None) else None)
+            return {
+                "nickname": nickname or None,
+                "avatar_url": (avatar_url or "").strip() or None,
+                "uniq_id": (uniq_id or "").strip() or None,
+            }
         except Exception:
-            return None
+            return empty
+
+    def extract_and_save_profile(
+        self, account_id: int, page: Optional[ChromiumPage] = None
+    ) -> dict:
+        """
+        登录成功后提取并回写视频号资料。优先 auth_data API，失败再 DOM。
+
+        Returns:
+            dict: 最终写入的 profile（可能字段为空）
+        """
+        account = self.dao.get_account(account_id)
+        if not account:
+            return {"nickname": None, "avatar_url": None, "uniq_id": None}
+
+        profile = self.fetch_account_profile_via_auth_data(account["cookie_path"])
+        if not (profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id")):
+            profile = self._extract_account_profile_from_dom(page)
+
+        if profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id"):
+            self.dao.update_account_profile(
+                account_id,
+                name=profile.get("nickname"),
+                avatar_url=profile.get("avatar_url"),
+                wechat_id=profile.get("uniq_id") or profile.get("nickname"),
+            )
+            logger.info(
+                f"账号资料已回写 #{account_id}: "
+                f"name={profile.get('nickname')}, uniq_id={profile.get('uniq_id')}"
+            )
+        else:
+            logger.warning(f"账号 #{account_id} 未能提取到视频号昵称/头像")
+        return profile
 
     def refresh_all_accounts(self) -> dict:
         """

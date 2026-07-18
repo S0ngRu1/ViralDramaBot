@@ -1593,7 +1593,7 @@ async def weixin_delete_favorite_location(location_id: int) -> Dict[str, Any]:
 
 @app.post("/api/weixin/accounts")
 async def weixin_create_account(request: AccountCreate) -> Dict[str, Any]:
-    """创建视频号账号"""
+    """创建视频号账号。名称可选，登录后自动回写视频号昵称与头像。"""
     try:
         account = weixin_account_mgr.create_account(request.name)
         return {"status": "success", "account": account}
@@ -1712,8 +1712,9 @@ def _run_embedded_login(session_id: str, account_id: int) -> None:
                 if not cookies_saved:
                     with page_lock:
                         weixin_account_mgr._save_cookies(page, cookie_path)
-                        wechat_id = weixin_account_mgr._extract_wechat_id(page)
-                    weixin_dao.update_account_status(account_id, AccountStatus.ACTIVE, wechat_id)
+                    weixin_dao.update_account_status(account_id, AccountStatus.ACTIVE)
+                    with page_lock:
+                        weixin_account_mgr.extract_and_save_profile(account_id, page=page)
                     cookies_saved = True
                 status = "active"
                 message = "视频号助手"
