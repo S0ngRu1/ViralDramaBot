@@ -130,6 +130,92 @@ class WeixinAccountProfileTests(unittest.TestCase):
             self.assertEqual("https://wx.qlogo.cn/finderhead/demo/0", saved["avatar_url"])
             self.assertEqual("sph0EsWCBF86AZF", saved["wechat_id"])
 
+    def test_extract_and_save_profile_falls_back_to_headless_when_no_page(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db_path = Path(tmp) / "weixin.db"
+            cookies_dir = Path(tmp) / "cookies"
+            cookies_dir.mkdir()
+            with patch.object(WeixinConfig, "COOKIES_DIR", cookies_dir), patch.object(
+                WeixinConfig, "DB_PATH", db_path
+            ):
+                dao = WeixinDAO(str(db_path))
+                account_id = dao.create_account()
+                account = dao.get_account(account_id)
+                Path(account["cookie_path"]).write_text("[]", encoding="utf-8")
+                manager = AccountManager(dao)
+
+                with patch.object(
+                    manager,
+                    "fetch_account_profile_via_auth_data",
+                    return_value={
+                        "nickname": None,
+                        "avatar_url": None,
+                        "uniq_id": None,
+                    },
+                ), patch.object(
+                    manager,
+                    "_fetch_account_profile_via_headless",
+                    return_value={
+                        "nickname": "平安12386",
+                        "avatar_url": "https://wx.qlogo.cn/finderhead/demo/0",
+                        "uniq_id": "sph0EsWCBF86AZF",
+                    },
+                ) as headless:
+                    profile = manager.extract_and_save_profile(account_id, page=None)
+
+                headless.assert_called_once()
+                saved = dao.get_account(account_id)
+
+            self.assertEqual("平安12386", profile["nickname"])
+            self.assertEqual("平安12386", saved["name"])
+            self.assertEqual("https://wx.qlogo.cn/finderhead/demo/0", saved["avatar_url"])
+
+    def test_fetch_auth_data_retries_on_connection_reset(self):
+        import requests
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            cookie_path = Path(tmp) / "c.json"
+            cookie_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "sessionid",
+                            "value": "abc",
+                            "domain": "channels.weixin.qq.com",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manager = AccountManager.__new__(AccountManager)
+            ok_resp = MagicMock()
+            ok_resp.raise_for_status.return_value = None
+            ok_resp.json.return_value = {
+                "errCode": 0,
+                "data": {
+                    "finderUser": {
+                        "nickname": "平安12386",
+                        "headImgUrl": "https://wx.qlogo.cn/finderhead/demo/0",
+                        "uniqId": "sph0EsWCBF86AZF",
+                    }
+                },
+            }
+            with patch("requests.Session") as session_cls, patch(
+                "time.sleep", return_value=None
+            ):
+                session = session_cls.return_value
+                session.post.side_effect = [
+                    requests.exceptions.ConnectionError("reset"),
+                    ok_resp,
+                ]
+                profile = manager.fetch_account_profile_via_auth_data(
+                    str(cookie_path), retries=3
+                )
+
+            self.assertEqual(2, session.post.call_count)
+            self.assertEqual("平安12386", profile["nickname"])
+
 
 if __name__ == "__main__":
     unittest.main()

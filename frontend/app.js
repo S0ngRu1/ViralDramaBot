@@ -42,6 +42,26 @@ const api = {
         }
     },
 
+    getDashboardTraffic: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/dashboard/traffic`);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
+    refreshDashboardTraffic: async (hours = 24) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/dashboard/traffic/refresh`, null, {
+                params: { hours }
+            });
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
     /**
      * 下载视频
      */
@@ -412,6 +432,41 @@ const api = {
     deleteWeixinAccount: async (id) => {
         try {
             const response = await axios.delete(`${API_BASE_URL}/weixin/accounts/${id}`);
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinAccounts: async (accountIds) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/batch-delete`, {
+                account_ids: accountIds
+            });
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    scanWeixinTraffic: async (accountId, payload) => {
+        try {
+            const response = await axios.post(
+                `${API_BASE_URL}/weixin/accounts/${accountId}/traffic/scan`,
+                payload
+            );
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
+    deleteWeixinTrafficPosts: async (accountId, postIds) => {
+        try {
+            const response = await axios.post(
+                `${API_BASE_URL}/weixin/accounts/${accountId}/traffic/delete`,
+                { post_ids: postIds }
+            );
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -841,14 +896,105 @@ app.component('dashboard-page', {
                     </div>
                 </div>
 
+                <div class="card" style="margin-top: 8px;">
+                    <div class="flex-between" style="align-items: flex-start; gap: 16px; margin-bottom: 16px;">
+                        <div>
+                            <div class="card-title" style="margin-bottom: 4px;">近 24 小时流量</div>
+                            <p class="text-muted" style="font-size: 12px; margin: 0;">
+                                平台播放量汇总；剧集排行仅统计上传时填写了「剧集链接」且能匹配到的视频。
+                                <span v-if="traffic?.refreshed_at">缓存时间：{{ formatTrafficTime(traffic.refreshed_at) }}</span>
+                                <span v-else>暂无缓存</span>
+                            </p>
+                        </div>
+                        <button
+                            class="btn btn-primary btn-small"
+                            :disabled="trafficRefreshing || traffic?.is_refreshing"
+                            @click="refreshTraffic"
+                        >{{ (trafficRefreshing || traffic?.is_refreshing) ? '刷新中...' : '刷新流量数据' }}</button>
+                    </div>
+
+                    <div v-if="traffic?.top_account" class="alert alert-info" style="margin-bottom: 14px;">
+                        流量最大账号：
+                        <strong>{{ traffic.top_account.account_name }}</strong>
+                        （总播放 {{ traffic.top_account.total_views }}，发表 {{ traffic.top_account.post_count }} 条）
+                    </div>
+                    <div v-if="traffic?.last_error" class="alert alert-danger" style="margin-bottom: 14px;">
+                        上次刷新异常：{{ traffic.last_error }}
+                    </div>
+                    <div v-if="traffic?.errors?.length" class="text-muted" style="font-size: 12px; margin-bottom: 10px;">
+                        部分账号拉取失败：{{ traffic.errors.map(e => e.account_name || ('#' + e.account_id)).join('、') }}
+                    </div>
+
+                    <div class="row">
+                        <div class="col">
+                            <h3 style="font-size: 15px; margin-bottom: 10px;">账号流量排行</h3>
+                            <div v-if="trafficAccounts.length" class="account-task-table-wrap">
+                                <table class="table" style="margin-bottom: 0;">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>账号</th>
+                                            <th>发表条数</th>
+                                            <th>总播放</th>
+                                            <th>最高单条</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="(row, idx) in trafficAccounts" :key="row.account_id">
+                                            <td>{{ idx + 1 }}</td>
+                                            <td>{{ row.account_name }}</td>
+                                            <td>{{ row.post_count }}</td>
+                                            <td>{{ row.total_views }}</td>
+                                            <td>{{ row.max_views }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div v-else class="empty-state" style="padding: 24px 0;">暂无账号流量数据，请刷新</div>
+                        </div>
+                        <div class="col">
+                            <h3 style="font-size: 15px; margin-bottom: 10px;">最火剧集排行</h3>
+                            <div v-if="trafficDramas.length" class="account-task-table-wrap">
+                                <table class="table" style="margin-bottom: 0;">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>剧集名称</th>
+                                            <th>视频数</th>
+                                            <th>总播放</th>
+                                            <th>账号数</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="(row, idx) in trafficDramas" :key="row.drama_link + '-' + idx">
+                                            <td>{{ idx + 1 }}</td>
+                                            <td :title="row.drama_link">{{ row.drama_link }}</td>
+                                            <td>{{ row.post_count }}</td>
+                                            <td>{{ row.total_views }}</td>
+                                            <td>{{ row.account_count }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div v-else class="empty-state" style="padding: 24px 0;">暂无剧集排行（需上传时填写剧集链接）</div>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     `,
     setup(props) {
         const dashboard = ref(null);
+        const traffic = ref(null);
         const loading = ref(false);
+        const trafficRefreshing = ref(false);
         const error = ref('');
         let timer = null;
+        let trafficPollTimer = null;
+
+        const trafficAccounts = computed(() => traffic.value?.accounts || []);
+        const trafficDramas = computed(() => traffic.value?.dramas || []);
 
         const loadDashboard = async () => {
             loading.value = true;
@@ -862,22 +1008,83 @@ app.component('dashboard-page', {
             }
         };
 
+        const loadTraffic = async () => {
+            try {
+                traffic.value = await props.api.getDashboardTraffic();
+            } catch (err) {
+                // 流量缓存失败不阻断概览主区
+                console.warn('load traffic failed', err);
+            }
+        };
+
+        const stopTrafficPoll = () => {
+            if (trafficPollTimer) {
+                clearInterval(trafficPollTimer);
+                trafficPollTimer = null;
+            }
+        };
+
+        const startTrafficPoll = () => {
+            stopTrafficPoll();
+            let ticks = 0;
+            trafficPollTimer = setInterval(async () => {
+                ticks += 1;
+                await loadTraffic();
+                if (!traffic.value?.is_refreshing || ticks >= 90) {
+                    trafficRefreshing.value = false;
+                    stopTrafficPoll();
+                }
+            }, 3000);
+        };
+
+        const refreshTraffic = async () => {
+            trafficRefreshing.value = true;
+            try {
+                await props.api.refreshDashboardTraffic(24);
+                await loadTraffic();
+                startTrafficPoll();
+            } catch (err) {
+                trafficRefreshing.value = false;
+                error.value = getErrorMessage(err);
+            }
+        };
+
+        const formatTrafficTime = (iso) => {
+            if (!iso) return '-';
+            try {
+                return new Date(iso).toLocaleString();
+            } catch (_) {
+                return iso;
+            }
+        };
+
         const statusCount = (stats, key) => Number(stats?.[key] || 0);
         const queueValue = (key) => dashboard.value?.queue?.[key];
 
-        onMounted(() => {
-            loadDashboard();
+        onMounted(async () => {
+            await Promise.all([loadDashboard(), loadTraffic()]);
             timer = setInterval(loadDashboard, 10000);
+            if (traffic.value?.is_refreshing) {
+                trafficRefreshing.value = true;
+                startTrafficPoll();
+            }
         });
         onBeforeUnmount(() => {
             if (timer) clearInterval(timer);
+            stopTrafficPoll();
         });
 
         return {
             dashboard,
+            traffic,
+            trafficAccounts,
+            trafficDramas,
             loading,
+            trafficRefreshing,
             error,
             loadDashboard,
+            refreshTraffic,
+            formatTrafficTime,
             statusCount,
             queueValue
         };
@@ -2017,12 +2224,19 @@ app.component('weixin-page', {
                         </div>
                     </div>
                     <div class="account-list" v-if="accounts.length">
-                        <button
+                        <div
                             v-for="acc in accounts"
                             :key="acc.id"
                             :class="['account-list-item', { active: selectedAccount && selectedAccount.id === acc.id }]"
                             @click="selectAccount(acc)"
                         >
+                            <input
+                                type="checkbox"
+                                class="account-select-checkbox"
+                                :checked="selectedAccountIds.includes(acc.id)"
+                                @click.stop
+                                @change="toggleAccountSelect(acc.id, $event.target.checked)"
+                            />
                             <span class="account-avatar">
                                 <img v-if="acc.avatar_url" :src="acc.avatar_url" :alt="acc.name" />
                                 <template v-else>{{ (acc.name || '?').slice(0, 1).toUpperCase() }}</template>
@@ -2032,11 +2246,20 @@ app.component('weixin-page', {
                                 <span class="account-list-meta">{{ acc.status === 'active' ? '已连接' : getStatusText(acc.status) }}</span>
                             </span>
                             <span :class="['account-status-dot', getStatusClass(acc.status)]"></span>
-                        </button>
+                        </div>
                     </div>
                     <table class="table legacy-account-table" v-if="accounts.length">
                         <thead>
                             <tr>
+                                <th style="width: 36px;">
+                                    <input
+                                        type="checkbox"
+                                        :checked="isAllAccountsSelected"
+                                        :indeterminate.prop="isPartiallyAccountsSelected"
+                                        @change="toggleSelectAllAccounts"
+                                        :disabled="refreshAllState.is_refreshing"
+                                    />
+                                </th>
                                 <th>ID</th>
                                 <th>名称</th>
                                 <th>状态</th>
@@ -2053,6 +2276,14 @@ app.component('weixin-page', {
                                 @click="selectAccount(acc)"
                                 style="cursor: pointer;"
                             >
+                                <td @click.stop>
+                                    <input
+                                        type="checkbox"
+                                        :checked="selectedAccountIds.includes(acc.id)"
+                                        @change="toggleAccountSelect(acc.id, $event.target.checked)"
+                                        :disabled="refreshAllState.is_refreshing"
+                                    />
+                                </td>
                                 <td>{{ acc.id }}</td>
                                 <td>{{ acc.name }}</td>
                                 <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
@@ -2073,7 +2304,7 @@ app.component('weixin-page', {
                                         <button v-if="false" class="btn btn-secondary btn-small" @click.stop="openWeixinPostList(acc.id)" :disabled="refreshAllState.is_refreshing">
                                             视频管理页
                                         </button>
-                                        <button class="btn btn-danger btn-small" @click.stop="deleteAccount(acc.id)" :disabled="refreshAllState.is_refreshing">删除</button>
+                                        <button class="btn btn-danger btn-small" @click.stop="openDeleteAccount(acc)" :disabled="refreshAllState.is_refreshing">删除</button>
                                     </div>
                                 </td>
                             </tr>
@@ -2083,7 +2314,23 @@ app.component('weixin-page', {
                         <span>暂无账号</span>
                         <button class="text-button" @click="showAddAccount = true">添加第一个账号</button>
                     </div>
-                    <div class="account-list-footer">{{ accounts.length }} 个账号</div>
+                    <div class="account-list-footer">
+                        <span class="account-list-count">{{ accounts.length }} 个账号</span>
+                        <div class="account-list-footer-actions">
+                            <button
+                                v-if="accounts.length"
+                                class="text-button"
+                                @click="toggleSelectAllAccounts"
+                                :disabled="refreshAllState.is_refreshing"
+                            >{{ isAllAccountsSelected ? '取消全选' : '全选' }}</button>
+                            <button
+                                class="btn btn-danger btn-small"
+                                @click="openBatchDeleteAccounts"
+                                :disabled="!selectedAccountIds.length || refreshAllState.is_refreshing || accountDeleteModal.busy"
+                                title="删除所选账号"
+                            >删除所选{{ selectedAccountIds.length ? (' (' + selectedAccountIds.length + ')') : '' }}</button>
+                        </div>
+                    </div>
                 </aside>
 
                 <main v-if="selectedAccount" class="account-main-panel">
@@ -2107,6 +2354,7 @@ app.component('weixin-page', {
                         <button :class="['account-tab', { active: accountDetailTab === 'upload' }]" @click="accountDetailTab = 'upload'">视频上传</button>
                         <button :class="['account-tab', { active: accountDetailTab === 'manage' }]" @click="openAccountManagement">视频号管理</button>
                         <button :class="['account-tab', { active: accountDetailTab === 'status' }]" @click="accountDetailTab = 'status'; loadTasks()">发布记录</button>
+                        <button :class="['account-tab', { active: accountDetailTab === 'traffic' }]" @click="accountDetailTab = 'traffic'">视频流量筛选</button>
                     </div>
 
                     <div v-if="false && accountDetailTab === 'upload'">
@@ -2162,7 +2410,42 @@ app.component('weixin-page', {
                             <div class="col">
                                 <div class="form-group">
                                     <label>发表位置</label>
-                                    <input v-model.trim="batchForm.location_label" type="text" placeholder="留空则按不显示位置发布">
+                                    <div ref="locationComboboxRef" style="position: relative;">
+                                        <input
+                                            v-model.trim="batchForm.location_label"
+                                            type="text"
+                                            placeholder="可下拉选择常用位置或手输；留空则按「不显示位置」发表"
+                                            style="padding-right: 36px;"
+                                            @focus="showLocationDropdown = true"
+                                        />
+                                        <button
+                                            type="button"
+                                            @click="showLocationDropdown = !showLocationDropdown"
+                                            :title="showLocationDropdown ? '收起' : '展开常用位置'"
+                                            style="position: absolute; right: 1px; top: 1px; bottom: 1px; width: 32px;
+                                                   background: transparent; border: none; cursor: pointer;
+                                                   color: #888; font-size: 12px;"
+                                        >{{ showLocationDropdown ? '▲' : '▼' }}</button>
+                                        <div
+                                            v-if="showLocationDropdown && filteredFavoriteLocations.length"
+                                            style="position: absolute; top: calc(100% + 2px); left: 0; right: 0;
+                                                   background: #fff; border: 1px solid #ddd; border-radius: 4px;
+                                                   box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-height: 220px;
+                                                   overflow-y: auto; z-index: 50;"
+                                        >
+                                            <div
+                                                v-for="loc in filteredFavoriteLocations"
+                                                :key="loc.id"
+                                                @mousedown.prevent="selectFavoriteLocation(loc.name)"
+                                                style="padding: 8px 12px; cursor: pointer; font-size: 14px;"
+                                                onmouseover="this.style.background='#f5f5f5'"
+                                                onmouseout="this.style.background='#fff'"
+                                            >{{ loc.name }}</div>
+                                        </div>
+                                    </div>
+                                    <p v-if="!favoriteLocations.length" class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                                        可在「代理与位置」页设置常用位置，之后这里会出现下拉候选
+                                    </p>
                                 </div>
                             </div>
                         </div>
@@ -2191,7 +2474,7 @@ app.component('weixin-page', {
                                 :disabled="refreshAllState.is_refreshing"
                             >重新加载页面</button>
                             <button class="btn btn-secondary" @click="refreshAccount(selectedAccount.id)" :disabled="refreshingIds.has(selectedAccount.id) || refreshAllState.is_refreshing">刷新状态</button>
-                            <button class="btn btn-danger" @click="deleteAccount(selectedAccount.id)" :disabled="refreshAllState.is_refreshing">删除账号</button>
+                            <button class="btn btn-danger" @click="openDeleteAccount(selectedAccount)" :disabled="refreshAllState.is_refreshing">删除账号</button>
                             </div>
                         </div>
                         <div v-if="selectedAccount.status !== 'active' && !nativeBrowserVisible" class="account-expired-state">
@@ -2278,6 +2561,101 @@ app.component('weixin-page', {
                         </table>
                         </div>
                         <div v-else class="empty-state">该账号暂无发布记录</div>
+                    </div>
+
+                    <div v-if="accountDetailTab === 'traffic'" class="account-tab-pane content-pane">
+                        <div class="pane-toolbar">
+                            <div>
+                                <h2>视频流量筛选</h2>
+                                <p>筛选低播放或有「作品优化建议」的视频，勾选后删除</p>
+                            </div>
+                            <div class="action-group">
+                                <span v-if="selectedTrafficIds.length" class="text-muted">已选 {{ selectedTrafficIds.length }} 项</span>
+                                <button
+                                    class="btn btn-danger btn-small"
+                                    :disabled="!selectedTrafficIds.length || trafficDeleting"
+                                    @click="deleteSelectedTrafficPosts"
+                                >{{ trafficDeleting ? '删除中...' : '删除选中' }}</button>
+                            </div>
+                        </div>
+                        <div class="traffic-filter-form row">
+                            <div class="col">
+                                <div class="form-group">
+                                    <label>观察期（小时）</label>
+                                    <input v-model.number="trafficFilter.grace_period_hours" type="number" min="0" step="1">
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="form-group">
+                                    <label>播放量低于</label>
+                                    <input v-model.number="trafficFilter.min_views" type="number" min="0" step="1">
+                                </div>
+                            </div>
+                            <div class="col" style="display:flex;align-items:flex-end;">
+                                <div class="form-group" style="width:100%;">
+                                    <label>&nbsp;</label>
+                                    <button
+                                        class="btn btn-primary btn-block"
+                                        :disabled="trafficScanning || !selectedAccount || selectedAccount.status !== 'active'"
+                                        @click="scanTrafficCandidates"
+                                    >{{ trafficScanning ? '扫描中...' : '扫描候选' }}</button>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="text-muted" style="font-size:12px;margin-bottom:14px;">
+                            命中规则：发表超过观察期且播放量低于阈值，或消息中心有「作品优化建议」（满足其一即可）。
+                            <span v-if="trafficScanMeta.scanned != null">最近扫描：作品 {{ trafficScanMeta.scanned }}，优化建议 {{ trafficScanMeta.optimize_tips }}，候选 {{ trafficCandidates.length }}。</span>
+                        </p>
+                        <div v-if="trafficCandidates.length" class="account-task-table-wrap">
+                            <table class="table account-task-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:36px;">
+                                            <input
+                                                type="checkbox"
+                                                :checked="isAllTrafficSelected"
+                                                :indeterminate.prop="isPartiallyTrafficSelected"
+                                                @change="toggleSelectAllTraffic($event.target.checked)"
+                                            />
+                                        </th>
+                                        <th>标题</th>
+                                        <th>发布时间</th>
+                                        <th>播放量</th>
+                                        <th>命中原因</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="item in trafficCandidates" :key="item.post_id">
+                                        <td>
+                                            <input type="checkbox" :value="item.post_id" v-model="selectedTrafficIds" />
+                                        </td>
+                                        <td :title="item.title">{{ item.title || item.post_id }}</td>
+                                        <td>{{ formatDate(item.published_at) }}</td>
+                                        <td>{{ item.view_count == null ? '-' : item.view_count }}</td>
+                                        <td>
+                                            <span
+                                                v-for="reason in item.reasons"
+                                                :key="reason"
+                                                class="badge"
+                                                :class="reason === 'low_views' ? 'badge-warning' : 'badge-pending'"
+                                                style="margin-right:4px;"
+                                            >{{ trafficReasonText(reason) }}</span>
+                                        </td>
+                                        <td>
+                                            <button
+                                                class="btn btn-danger btn-small"
+                                                :disabled="trafficDeleting"
+                                                @click="deleteTrafficPosts([item.post_id])"
+                                            >删除</button>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div v-else class="empty-state">
+                            {{ trafficScannedOnce ? '暂无符合条件的候选视频' : '设置筛选条件后点击「扫描候选」' }}
+                        </div>
                     </div>
                 </main>
 
@@ -2723,6 +3101,19 @@ app.component('weixin-page', {
                     </div>
                 </div>
             </div>
+
+            <div v-if="accountDeleteModal.show" class="modal-overlay" @click.self="closeAccountDeleteModal">
+                <div class="modal-box">
+                    <h3>删除视频号账号</h3>
+                    <p style="margin: 0 0 20px; color: #4b5563; line-height: 1.6;">{{ accountDeleteModalMessage }}</p>
+                    <div class="modal-actions">
+                        <button class="btn btn-secondary" @click="closeAccountDeleteModal" :disabled="accountDeleteModal.busy">取消</button>
+                        <button class="btn btn-danger" @click="confirmAccountDelete" :disabled="accountDeleteModal.busy">
+                            {{ accountDeleteModal.busy ? '删除中...' : '确定删除' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     `,
 
@@ -2736,7 +3127,18 @@ app.component('weixin-page', {
         const tasks = ref([]);
         const selectedTaskIds = ref([]);
         const selectedAccount = ref(null);
+        const selectedAccountIds = ref([]);
         const accountDetailTab = ref('upload');
+        const trafficFilter = reactive({
+            grace_period_hours: 72,
+            min_views: 100,
+        });
+        const trafficCandidates = ref([]);
+        const selectedTrafficIds = ref([]);
+        const trafficScanning = ref(false);
+        const trafficDeleting = ref(false);
+        const trafficScannedOnce = ref(false);
+        const trafficScanMeta = reactive({ scanned: null, optimize_tips: null });
         const schedules = ref([]);
         const proxyProfiles = ref([]);
         const favoriteLocations = ref([]);
@@ -2750,6 +3152,13 @@ app.component('weixin-page', {
         const proxyComboboxRef = ref(null);
         const showAddAccount = ref(false);
         const showProxyModal = ref(false);
+        const accountDeleteModal = reactive({
+            show: false,
+            mode: 'single',
+            ids: [],
+            names: [],
+            busy: false,
+        });
         const newAccountName = ref('');
         const addingAccount = ref(false);
         const refreshingIds = ref(new Set());
@@ -2758,6 +3167,8 @@ app.component('weixin-page', {
         const browserCanvasRef = ref(null);
         const browserHostRef = ref(null);
         const nativeBrowserVisible = ref(false);
+        // 原生 WebView2 是 WinForms 控件，会盖住 HTML 弹窗；弹窗期间需先藏起再恢复
+        const nativeBrowserHiddenForModal = ref(false);
         const hasNativeBrowser = computed(() => Boolean(getDesktopApi()?.showWeixinBrowser));
         const loginModal = reactive({
             show: false,
@@ -2795,13 +3206,14 @@ app.component('weixin-page', {
         let refreshPollTimer = null;
 
         const DEFAULT_BATCH_DESCRIPTION = '#ys点击上方❤【免费剧集】0元看全集';
+        const DEFAULT_LOCATION_LABEL = '樱桃沟管委会西胡垌社区党群服务中心';
         const batchForm = reactive({
             account_id: '',
             videoFiles: [],
             descriptionStr: DEFAULT_BATCH_DESCRIPTION,
             drama_link: '',
             proxy_profile_id: '',
-            location_label: ''
+            location_label: DEFAULT_LOCATION_LABEL
         });
         const scheduleForm = reactive({
             account_id: '', video_paths: '', schedule_type: 'interval',
@@ -2844,6 +3256,11 @@ app.component('weixin-page', {
             selectedAccount.value = acc;
             accountDetailTab.value = 'upload';
             batchForm.account_id = acc.id;
+            trafficCandidates.value = [];
+            selectedTrafficIds.value = [];
+            trafficScannedOnce.value = false;
+            trafficScanMeta.scanned = null;
+            trafficScanMeta.optimize_tips = null;
         }
 
         const selectedAccountTasks = computed(() => {
@@ -2888,6 +3305,11 @@ app.component('weixin-page', {
             try {
                 const res = await props.api.getWeixinAccounts();
                 accounts.value = res.accounts || [];
+                const alive = new Set(accounts.value.map(a => Number(a.id)));
+                selectedAccountIds.value = selectedAccountIds.value.filter(id => alive.has(Number(id)));
+                if (selectedAccount.value) {
+                    selectedAccount.value = accounts.value.find(a => a.id === selectedAccount.value.id) || null;
+                }
             } catch (e) {
                 console.error(e);
             }
@@ -3220,6 +3642,24 @@ app.component('weixin-page', {
             if (desktop?.hideWeixinBrowser) await desktop.hideWeixinBrowser();
         }
 
+        async function suspendNativeBrowserForModal() {
+            if (!nativeBrowserVisible.value) return;
+            nativeBrowserHiddenForModal.value = true;
+            await hideNativeWeixinBrowser();
+        }
+
+        async function resumeNativeBrowserAfterModal() {
+            if (!nativeBrowserHiddenForModal.value) return;
+            nativeBrowserHiddenForModal.value = false;
+            if (
+                tab.value === 'accounts'
+                && accountDetailTab.value === 'manage'
+                && selectedAccount.value
+            ) {
+                await startNativeWeixinBrowser(selectedAccount.value.status !== 'active');
+            }
+        }
+
         async function reloadNativeWeixinBrowser() {
             const desktop = getDesktopApi();
             if (!nativeBrowserVisible.value) {
@@ -3353,20 +3793,109 @@ app.component('weixin-page', {
             }
         }
 
-        async function deleteAccount(id) {
-            if (!confirm('确定删除该账号？')) return;
+        const isAllAccountsSelected = computed(() => {
+            return accounts.value.length > 0
+                && selectedAccountIds.value.length === accounts.value.length;
+        });
+
+        const isPartiallyAccountsSelected = computed(() => {
+            return selectedAccountIds.value.length > 0 && !isAllAccountsSelected.value;
+        });
+
+        const accountDeleteModalMessage = computed(() => {
+            if (accountDeleteModal.mode === 'single') {
+                const name = accountDeleteModal.names[0] || '未命名账号';
+                return `确定删除视频号账号「${name}」？删除后需重新扫码登录，相关上传任务与定时计划也会一并清除。`;
+            }
+            const n = accountDeleteModal.ids.length;
+            return `确定删除选中的 ${n} 个视频号账号？删除后需重新扫码登录，相关上传任务与定时计划也会一并清除。`;
+        });
+
+        function toggleAccountSelect(id, checked) {
+            const numId = Number(id);
+            const set = new Set(selectedAccountIds.value.map(Number));
+            if (checked) set.add(numId);
+            else set.delete(numId);
+            selectedAccountIds.value = Array.from(set);
+        }
+
+        function toggleSelectAllAccounts() {
+            if (isAllAccountsSelected.value) {
+                selectedAccountIds.value = [];
+            } else {
+                selectedAccountIds.value = accounts.value.map(a => Number(a.id));
+            }
+        }
+
+        async function openDeleteAccount(acc) {
+            if (!acc) return;
+            await suspendNativeBrowserForModal();
+            accountDeleteModal.show = true;
+            accountDeleteModal.mode = 'single';
+            accountDeleteModal.ids = [Number(acc.id)];
+            accountDeleteModal.names = [acc.name || '未命名账号'];
+            accountDeleteModal.busy = false;
+        }
+
+        async function openBatchDeleteAccounts() {
+            if (!selectedAccountIds.value.length) return;
+            const ids = selectedAccountIds.value.map(Number);
+            const names = ids.map(id => {
+                const acc = accounts.value.find(a => Number(a.id) === id);
+                return acc ? acc.name : `#${id}`;
+            });
+            await suspendNativeBrowserForModal();
+            accountDeleteModal.show = true;
+            accountDeleteModal.mode = 'batch';
+            accountDeleteModal.ids = ids;
+            accountDeleteModal.names = names;
+            accountDeleteModal.busy = false;
+        }
+
+        async function closeAccountDeleteModal() {
+            if (accountDeleteModal.busy) return;
+            accountDeleteModal.show = false;
+            accountDeleteModal.ids = [];
+            accountDeleteModal.names = [];
+            await resumeNativeBrowserAfterModal();
+        }
+
+        async function applyDeletedAccounts(deletedIds) {
+            const deleted = new Set((deletedIds || []).map(Number));
+            selectedAccountIds.value = selectedAccountIds.value.filter(id => !deleted.has(Number(id)));
+            if (selectedAccount.value && deleted.has(Number(selectedAccount.value.id))) {
+                await hideNativeWeixinBrowser();
+                selectedAccount.value = null;
+                accountDetailTab.value = 'upload';
+                batchForm.account_id = '';
+            }
+        }
+
+        async function confirmAccountDelete() {
+            const ids = accountDeleteModal.ids.map(Number);
+            if (!ids.length || accountDeleteModal.busy) return;
+            accountDeleteModal.busy = true;
             try {
-                await props.api.deleteWeixinAccount(id);
-                if (selectedAccount.value && Number(selectedAccount.value.id) === Number(id)) {
-                    await hideNativeWeixinBrowser();
-                    selectedAccount.value = null;
-                    accountDetailTab.value = 'upload';
-                    batchForm.account_id = '';
+                if (accountDeleteModal.mode === 'single') {
+                    await props.api.deleteWeixinAccount(ids[0]);
+                    await applyDeletedAccounts(ids);
+                    await loadAccounts();
+                    showMessage('账号已删除', 'success');
+                } else {
+                    const res = await props.api.deleteWeixinAccounts(ids);
+                    await applyDeletedAccounts(res.deleted || []);
+                    await loadAccounts();
+                    const parts = [];
+                    if ((res.deleted || []).length) parts.push(`已删除 ${(res.deleted || []).length} 个`);
+                    if ((res.skipped_active || []).length) parts.push(`跳过进行中 ${(res.skipped_active || []).length} 个`);
+                    if ((res.not_found || []).length) parts.push(`不存在 ${(res.not_found || []).length} 个`);
+                    showMessage(parts.join('，') || (res.message || '批量删除完成'), 'success');
                 }
-                await loadAccounts();
-                showMessage('账号已删除', 'success');
+                accountDeleteModal.busy = false;
+                closeAccountDeleteModal();
             } catch (e) {
-                showMessage('删除失败', 'error');
+                accountDeleteModal.busy = false;
+                showMessage('删除失败: ' + getErrorMessage(e), 'error');
             }
         }
 
@@ -3417,7 +3946,7 @@ app.component('weixin-page', {
                 batchForm.videoFiles = [];
                 batchForm.descriptionStr = DEFAULT_BATCH_DESCRIPTION;
                 batchForm.drama_link = '';
-                batchForm.location_label = '';
+                batchForm.location_label = DEFAULT_LOCATION_LABEL;
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
             }
@@ -3480,6 +4009,83 @@ app.component('weixin-page', {
             } catch (e) {
                 showMessage('删除失败', 'error');
             }
+        }
+
+        function trafficReasonText(reason) {
+            return { low_views: '低播放', optimize_tip: '优化建议' }[reason] || reason;
+        }
+
+        const isAllTrafficSelected = computed(() => {
+            const ids = trafficCandidates.value.map(c => c.post_id);
+            return ids.length > 0 && ids.every(id => selectedTrafficIds.value.includes(id));
+        });
+
+        const isPartiallyTrafficSelected = computed(() => {
+            const ids = trafficCandidates.value.map(c => c.post_id);
+            const n = ids.filter(id => selectedTrafficIds.value.includes(id)).length;
+            return n > 0 && n < ids.length;
+        });
+
+        function toggleSelectAllTraffic(checked) {
+            selectedTrafficIds.value = checked
+                ? trafficCandidates.value.map(c => c.post_id)
+                : [];
+        }
+
+        async function scanTrafficCandidates() {
+            if (!selectedAccount.value) return;
+            if (selectedAccount.value.status !== 'active') {
+                showMessage('请先登录账号后再扫描', 'error');
+                return;
+            }
+            trafficScanning.value = true;
+            selectedTrafficIds.value = [];
+            try {
+                const res = await props.api.scanWeixinTraffic(selectedAccount.value.id, {
+                    grace_period_hours: Number(trafficFilter.grace_period_hours) || 0,
+                    min_views: Number(trafficFilter.min_views) || 0,
+                });
+                trafficScannedOnce.value = true;
+                if (res.status !== 'success') {
+                    trafficCandidates.value = [];
+                    showMessage(res.message || '扫描失败', 'error');
+                    return;
+                }
+                trafficCandidates.value = res.candidates || [];
+                trafficScanMeta.scanned = res.scanned ?? null;
+                trafficScanMeta.optimize_tips = res.optimize_tips ?? null;
+                showMessage(`扫描完成：候选 ${trafficCandidates.value.length} 条`, 'success');
+            } catch (e) {
+                showMessage('扫描失败: ' + (e.detail || e.message || e), 'error');
+            } finally {
+                trafficScanning.value = false;
+            }
+        }
+
+        async function deleteTrafficPosts(postIds) {
+            if (!selectedAccount.value || !postIds?.length) return;
+            trafficDeleting.value = true;
+            try {
+                const res = await props.api.deleteWeixinTrafficPosts(selectedAccount.value.id, postIds);
+                const deleted = new Set(res.deleted || []);
+                trafficCandidates.value = trafficCandidates.value.filter(c => !deleted.has(c.post_id));
+                selectedTrafficIds.value = selectedTrafficIds.value.filter(id => !deleted.has(id));
+                if (res.status === 'success' || res.status === 'partial') {
+                    showMessage(res.message || '删除完成', deleted.size ? 'success' : 'error');
+                } else {
+                    showMessage(res.message || '删除失败', 'error');
+                }
+            } catch (e) {
+                showMessage('删除失败: ' + (e.detail || e.message || e), 'error');
+            } finally {
+                trafficDeleting.value = false;
+            }
+        }
+
+        async function deleteSelectedTrafficPosts() {
+            if (!selectedTrafficIds.value.length) return;
+            if (!confirm(`确定删除选中的 ${selectedTrafficIds.value.length} 条视频？此操作不可恢复。`)) return;
+            await deleteTrafficPosts([...selectedTrafficIds.value]);
         }
 
         async function pollRefreshStatus() {
@@ -3602,11 +4208,15 @@ app.component('weixin-page', {
 
         return {
             tab, accounts, tasks, selectedTaskIds, schedules, proxyProfiles,
-            selectedAccount, accountDetailTab, selectedAccountTasks, selectAccount, goAccountUpload,
+            selectedAccount, selectedAccountIds, accountDetailTab, selectedAccountTasks, selectAccount, goAccountUpload,
+            trafficFilter, trafficCandidates, selectedTrafficIds, trafficScanning, trafficDeleting,
+            trafficScannedOnce, trafficScanMeta, trafficReasonText,
+            isAllTrafficSelected, isPartiallyTrafficSelected, toggleSelectAllTraffic,
+            scanTrafficCandidates, deleteTrafficPosts, deleteSelectedTrafficPosts,
             favoriteLocations, newFavoriteLocation,
             showLocationDropdown, locationComboboxRef, filteredFavoriteLocations, selectFavoriteLocation,
             showProxyDropdown, proxyComboboxRef, selectedProxyDisplay, selectProxyProfile,
-            showAddAccount, showProxyModal, newAccountName, addingAccount, message, refreshingIds, loginModal, browserCanvasRef,
+            showAddAccount, showProxyModal, accountDeleteModal, accountDeleteModalMessage, newAccountName, addingAccount, message, refreshingIds, loginModal, browserCanvasRef,
             browserHostRef, nativeBrowserVisible, hasNativeBrowser,
             isBrowsingBatchFiles, checkingAllProxies, refreshAllState,
             proxyForm, enabledProxyProfiles,
@@ -3615,12 +4225,15 @@ app.component('weixin-page', {
             getStatusClass, getStatusText, getTaskStatusClass, getTaskStatusText,
             isTaskActive, selectableTaskIds, isAllSelectableSelected, isPartiallySelected,
             toggleSelectAllTasks, deleteSelectedTasks,
+            isAllAccountsSelected, isPartiallyAccountsSelected,
+            toggleAccountSelect, toggleSelectAllAccounts,
+            openDeleteAccount, openBatchDeleteAccounts, closeAccountDeleteModal, confirmAccountDelete,
             loadAccounts, loadTasks, loadSchedules, loadProxyProfiles, triggerRefreshAll,
             loadFavoriteLocations, addFavoriteLocation, deleteFavoriteLocation,
             addAccount, loginAccount, openAccountManagement, restartAccountBrowser, cancelEmbeddedLogin,
             startNativeWeixinBrowser, reloadNativeWeixinBrowser, backNativeWeixinBrowser,
             handleBrowserClick, handleBrowserWheel, handleBrowserKeydown, sendBrowserNavigation,
-            refreshAccount, deleteAccount, openWeixinPostList,
+            refreshAccount, openWeixinPostList,
             openProxyModal, closeProxyModal, saveProxyProfile, deleteProxyProfile,
             checkProxyProfile, checkAllProxyProfiles,
             browseBatchFiles, removeBatchFile,

@@ -161,10 +161,33 @@ class AccountManager:
             return False
 
         cookie_path = account["cookie_path"]
-        if not Path(cookie_path).exists():
-            logger.warn(f"Cookie 文件不存在: {cookie_path}")
+        if not cookie_path:
+            logger.warn(f"账号 {account_id} cookie_path 为空")
             self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
             return False
+        path = Path(cookie_path)
+        if not path.exists():
+            # 与原生 WebView 扫码落盘并发时，exists 检查与写状态之间可能刚生成文件；
+            # 短暂复检，避免误标过期并覆盖刚写入的 active。
+            for _ in range(6):
+                time.sleep(0.5)
+                if path.exists():
+                    break
+            if not path.exists():
+                logger.warn(f"Cookie 文件不存在: {cookie_path}")
+                latest = self.dao.get_account(account_id)
+                status = (latest or {}).get("status")
+                if status in (
+                    AccountStatus.LOGGING_IN.value,
+                    AccountStatus.ACTIVE.value,
+                ):
+                    logger.info(
+                        f"账号 {account.get('name')} 当前状态为 {status}，"
+                        f"跳过因 Cookie 暂不可见而标过期"
+                    )
+                    return False
+                self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                return False
 
         page = None
         try:
@@ -181,7 +204,20 @@ class AccountManager:
 
             result = self._check_login_status(page)
             if result["success"]:
-                self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
+                superseder = self.dao.find_superseding_account(account_id)
+                if superseder:
+                    self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
+                    if cookie_path:
+                        Path(cookie_path).unlink(missing_ok=True)
+                    logger.warn(
+                        f"账号 {account['name']} Cookie 校验虽通过，"
+                        f"但同视频号已被槽位 #{superseder['id']} "
+                        f"({superseder.get('name')}) 更新登录顶替，标为过期"
+                    )
+                    return False
+                self.dao.update_account_status(
+                    account_id, AccountStatus.ACTIVE, touch_login_at=False
+                )
                 logger.info(f"自动登录成功: {account['name']}")
                 return True
             else:
@@ -254,6 +290,20 @@ class AccountManager:
         if ok:
             release_account_lock(account_id)
         return ok
+
+    def delete_accounts(self, account_ids: list[int]) -> dict:
+        """批量删除账号；对成功删除的 id 释放 per-account 锁。"""
+        result = self.dao.delete_accounts(account_ids)
+        for account_id in result.get("deleted") or []:
+            release_account_lock(int(account_id))
+        deleted = result.get("deleted") or []
+        skipped = result.get("skipped_active") or []
+        not_found = result.get("not_found") or []
+        logger.info(
+            f"批量删除账号完成：删除 {len(deleted)}，"
+            f"跳过进行中 {len(skipped)}，不存在 {len(not_found)}"
+        )
+        return result
 
     def _wait_for_login(self, page: ChromiumPage, timeout: int = 120) -> dict:
         """
@@ -562,14 +612,20 @@ class AccountManager:
         uniq_id = (finder.get("uniqId") or "").strip() or None
         return {"nickname": nickname, "avatar_url": avatar_url, "uniq_id": uniq_id}
 
-    def fetch_account_profile_via_auth_data(self, cookie_path: str) -> dict:
+    def fetch_account_profile_via_auth_data(
+        self, cookie_path: str, *, retries: int = 4
+    ) -> dict:
         """
         用已保存 Cookie 调用 auth/auth_data，获取视频号昵称与头像。
+
+        视频号侧偶发 ConnectionReset(10054)，对连接类错误做短暂重试。
 
         Returns:
             dict: {"nickname": str|None, "avatar_url": str|None, "uniq_id": str|None}
         """
         import requests
+        from requests.exceptions import ConnectionError as ReqConnectionError
+        from requests.exceptions import Timeout as ReqTimeout
 
         empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
         path = Path(cookie_path)
@@ -588,41 +644,181 @@ class AccountManager:
             value = item.get("value")
             if not name:
                 continue
-            domain = item.get("domain") or ".weixin.qq.com"
-            session.cookies.set(str(name), str(value), domain=str(domain))
+            domain = str(item.get("domain") or ".weixin.qq.com").lstrip()
+            # 原生 WebView 落盘常为 channels.weixin.qq.com；同时挂一份父域，
+            # 降低 Cookie 未随请求带上的概率。
+            for cookie_domain in {domain, ".weixin.qq.com", "channels.weixin.qq.com"}:
+                if not cookie_domain:
+                    continue
+                try:
+                    session.cookies.set(
+                        str(name), str(value), domain=cookie_domain, path="/"
+                    )
+                except Exception:
+                    continue
 
-        body = {
-            "timestamp": str(int(time.time() * 1000)),
-            "_log_finder_uin": "",
-            "_log_finder_id": "",
-            "rawKeyBuff": "",
-            "pluginSessionId": None,
-            "scene": 7,
-            "reqScene": 7,
-        }
         headers = {
             "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
             "Origin": WeixinConfig.CHANNELS_URL,
             "Referer": f"{WeixinConfig.CHANNELS_URL}/platform/home",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"
+            ),
         }
-        try:
-            resp = session.post(
-                WeixinConfig.AUTH_DATA_URL,
-                json=body,
-                headers=headers,
-                timeout=20,
-            )
-            resp.raise_for_status()
-            profile = self.parse_auth_data_profile(resp.json())
-            if profile.get("nickname") or profile.get("avatar_url"):
-                logger.info(
-                    f"auth_data 资料提取成功: nickname={profile.get('nickname')}, "
-                    f"uniq_id={profile.get('uniq_id')}"
+        attempts = max(1, int(retries))
+        last_error: Optional[BaseException] = None
+        for attempt in range(attempts):
+            body = {
+                "timestamp": str(int(time.time() * 1000)),
+                "_log_finder_uin": "",
+                "_log_finder_id": "",
+                "rawKeyBuff": "",
+                "pluginSessionId": None,
+                "scene": 7,
+                "reqScene": 7,
+            }
+            try:
+                resp = session.post(
+                    WeixinConfig.AUTH_DATA_URL,
+                    json=body,
+                    headers=headers,
+                    timeout=20,
                 )
-            return profile
-        except Exception as e:
-            logger.warning(f"调用 auth/auth_data 失败: {e}")
+                resp.raise_for_status()
+                payload = resp.json()
+                profile = self.parse_auth_data_profile(payload)
+                if profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id"):
+                    logger.info(
+                        f"auth_data 资料提取成功: nickname={profile.get('nickname')}, "
+                        f"uniq_id={profile.get('uniq_id')}"
+                    )
+                    return profile
+                # HTTP 200 但资料为空（登录刚完成会话未就绪 / errCode 非 0）也重试
+                err_code = None
+                if isinstance(payload, dict):
+                    err_code = payload.get("errCode", payload.get("errcode"))
+                last_error = RuntimeError(
+                    f"auth_data 响应无资料 errCode={err_code} body={str(payload)[:180]}"
+                )
+                if attempt + 1 < attempts:
+                    delay = 1.0 * (attempt + 1)
+                    logger.warning(
+                        f"auth_data 暂无资料，{delay:.1f}s 后重试 "
+                        f"({attempt + 1}/{attempts}): {last_error}"
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+            except (ReqConnectionError, ReqTimeout, ConnectionResetError, OSError) as e:
+                last_error = e
+                if attempt + 1 < attempts:
+                    delay = 0.8 * (attempt + 1)
+                    logger.warning(
+                        f"调用 auth/auth_data 连接失败，{delay:.1f}s 后重试 "
+                        f"({attempt + 1}/{attempts}): {e}"
+                    )
+                    time.sleep(delay)
+                    continue
+            except Exception as e:
+                last_error = e
+                break
+
+        logger.warning(f"调用 auth/auth_data 失败: {last_error}")
+        return empty
+
+    def _fetch_account_profile_via_headless(self, cookie_path: str) -> dict:
+        """
+        原生 WebView 登录后没有 DrissionPage 实例时的兜底：
+        用无头浏览器注入 Cookie，先页内 fetch auth_data，再 DOM 提取。
+        """
+        empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
+        if not cookie_path or not Path(cookie_path).exists():
             return empty
+
+        page = None
+        try:
+            page = self._create_headless_browser(cookie_path, proxy_url=None)
+            self._load_cookies(page, cookie_path)
+            page.get(f"{WeixinConfig.CHANNELS_URL}/platform/home")
+            try:
+                page.ele(
+                    "css:h2.finder-nickname, .finder-info-container, img.avatar",
+                    timeout=12,
+                )
+            except Exception:
+                pass
+
+            profile = self._fetch_auth_data_in_page(page)
+            if profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id"):
+                return profile
+            return self._extract_account_profile_from_dom(page)
+        except Exception as e:
+            logger.warning(f"无头浏览器资料提取失败: {e}")
+            return empty
+        finally:
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
+
+    def _fetch_auth_data_in_page(self, page: ChromiumPage) -> dict:
+        """在已登录的页面上下文内 fetch auth_data（走浏览器 TLS，更抗重置）。"""
+        empty = {"nickname": None, "avatar_url": None, "uniq_id": None}
+        if page is None:
+            return empty
+        try:
+            page.run_js(
+                """
+                window.__vdAuthData = null;
+                window.__vdAuthDataErr = null;
+                const body = {
+                  timestamp: String(Date.now()),
+                  _log_finder_uin: '',
+                  _log_finder_id: '',
+                  rawKeyBuff: '',
+                  pluginSessionId: null,
+                  scene: 7,
+                  reqScene: 7,
+                };
+                fetch('/cgi-bin/mmfinderassistant-bin/auth/auth_data', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'include',
+                  body: JSON.stringify(body),
+                })
+                  .then((r) => r.json())
+                  .then((data) => { window.__vdAuthData = data; })
+                  .catch((err) => { window.__vdAuthDataErr = String(err); });
+                """
+            )
+            payload = None
+            for _ in range(40):
+                time.sleep(0.25)
+                err = page.run_js("return window.__vdAuthDataErr || null;")
+                if err:
+                    logger.debug(f"页内 auth_data 失败: {err}")
+                    return empty
+                data = page.run_js("return window.__vdAuthData;")
+                if data:
+                    payload = data
+                    break
+        except Exception as e:
+            logger.debug(f"页内 auth_data 调用失败: {e}")
+            return empty
+
+        if not isinstance(payload, dict):
+            return empty
+        profile = self.parse_auth_data_profile(payload)
+        if profile.get("nickname") or profile.get("avatar_url"):
+            logger.info(
+                f"页内 auth_data 资料提取成功: nickname={profile.get('nickname')}, "
+                f"uniq_id={profile.get('uniq_id')}"
+            )
+        return profile
 
     def _extract_account_profile_from_dom(self, page: ChromiumPage) -> dict:
         """从创作者中心首页 DOM 兜底提取昵称 / 头像 / 视频号 ID。"""
@@ -705,7 +901,9 @@ class AccountManager:
         self, account_id: int, page: Optional[ChromiumPage] = None
     ) -> dict:
         """
-        登录成功后提取并回写视频号资料。优先 auth_data API，失败再 DOM。
+        登录成功后提取并回写视频号资料。
+
+        顺序：HTTP auth_data（含重试）→ 已有 page 的页内/DOM → 无 page 时无头浏览器兜底。
 
         Returns:
             dict: 最终写入的 profile（可能字段为空）
@@ -714,21 +912,42 @@ class AccountManager:
         if not account:
             return {"nickname": None, "avatar_url": None, "uniq_id": None}
 
-        profile = self.fetch_account_profile_via_auth_data(account["cookie_path"])
+        cookie_path = account.get("cookie_path") or ""
+        profile = self.fetch_account_profile_via_auth_data(cookie_path)
         if not (profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id")):
-            profile = self._extract_account_profile_from_dom(page)
+            if page is not None:
+                profile = self._fetch_auth_data_in_page(page)
+                if not (
+                    profile.get("nickname")
+                    or profile.get("avatar_url")
+                    or profile.get("uniq_id")
+                ):
+                    profile = self._extract_account_profile_from_dom(page)
+            else:
+                # 桌面原生 WebView 扫码落盘后没有 ChromiumPage，必须另起无头会话兜底
+                logger.info(f"账号 #{account_id} auth_data 未拿到资料，改用无头浏览器兜底")
+                profile = self._fetch_account_profile_via_headless(cookie_path)
 
         if profile.get("nickname") or profile.get("avatar_url") or profile.get("uniq_id"):
+            identity = profile.get("uniq_id") or profile.get("nickname")
             self.dao.update_account_profile(
                 account_id,
                 name=profile.get("nickname"),
                 avatar_url=profile.get("avatar_url"),
-                wechat_id=profile.get("uniq_id") or profile.get("nickname"),
+                wechat_id=identity,
             )
             logger.info(
                 f"账号资料已回写 #{account_id}: "
                 f"name={profile.get('nickname')}, uniq_id={profile.get('uniq_id')}"
             )
+            # 同一视频号只允许一个槽位保持有效：新登录成功后作废其他槽位
+            if identity:
+                expired_ids = self.dao.invalidate_sibling_accounts(account_id, identity)
+                if expired_ids:
+                    logger.info(
+                        f"同视频号登录顶替：保留 #{account_id}，"
+                        f"已作废槽位 {expired_ids}"
+                    )
         else:
             logger.warning(f"账号 #{account_id} 未能提取到视频号昵称/头像")
         return profile

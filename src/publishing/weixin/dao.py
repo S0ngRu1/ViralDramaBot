@@ -133,6 +133,14 @@ class WeixinDAO:
             if "avatar_url" not in existing_account_cols:
                 conn.execute("ALTER TABLE accounts ADD COLUMN avatar_url TEXT")
 
+            # 确保默认常用发表位置存在（老库升级 / 全新安装都走这里）
+            default_loc = (WeixinConfig.DEFAULT_FAVORITE_LOCATION or "").strip()
+            if default_loc:
+                conn.execute(
+                    "INSERT OR IGNORE INTO favorite_locations (name, created_at) VALUES (?, ?)",
+                    (default_loc, datetime.now().isoformat()),
+                )
+
     # ==================== 账号操作 ====================
 
     def create_account(self, name: Optional[str] = None) -> int:
@@ -173,16 +181,32 @@ class WeixinDAO:
             return [dict(r) for r in rows]
 
     def update_account_status(
-        self, account_id: int, status: AccountStatus, wechat_id: Optional[str] = None
+        self,
+        account_id: int,
+        status: AccountStatus,
+        wechat_id: Optional[str] = None,
+        *,
+        touch_login_at: bool = True,
     ):
-        """更新账号状态"""
+        """
+        更新账号状态。
+
+        touch_login_at: 仅真实扫码/落盘登录时应为 True。
+        后台 Cookie 校验复检成功时传 False，避免刷新 last_login_at 打乱「谁是最新登录槽位」。
+        """
         now = datetime.now().isoformat()
         with self._get_conn() as conn:
             if status == AccountStatus.ACTIVE:
-                conn.execute(
-                    "UPDATE accounts SET status = ?, wechat_id = COALESCE(?, wechat_id), last_login_at = ? WHERE id = ?",
-                    (status.value, wechat_id, now, account_id),
-                )
+                if touch_login_at:
+                    conn.execute(
+                        "UPDATE accounts SET status = ?, wechat_id = COALESCE(?, wechat_id), last_login_at = ? WHERE id = ?",
+                        (status.value, wechat_id, now, account_id),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE accounts SET status = ?, wechat_id = COALESCE(?, wechat_id) WHERE id = ?",
+                        (status.value, wechat_id, account_id),
+                    )
             else:
                 conn.execute(
                     "UPDATE accounts SET status = ? WHERE id = ?",
@@ -218,6 +242,52 @@ class WeixinDAO:
             )
         return True
 
+    def invalidate_sibling_accounts(self, account_id: int, wechat_id: str) -> list[int]:
+        """
+        同一视频号登录到新槽位后，作废其他槽位：标为 expired 并删除 Cookie 文件，
+        避免启动刷新用旧 Cookie 再次把它们标成 active。
+        """
+        identity = (wechat_id or "").strip()
+        if not identity:
+            return []
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, cookie_path, status FROM accounts "
+                "WHERE id != ? AND wechat_id = ?",
+                (account_id, identity),
+            ).fetchall()
+        expired_ids: list[int] = []
+        for row in rows:
+            sibling = dict(row)
+            sid = int(sibling["id"])
+            cookie_path = sibling.get("cookie_path")
+            if cookie_path:
+                Path(cookie_path).unlink(missing_ok=True)
+            self.update_account_status(sid, AccountStatus.EXPIRED)
+            expired_ids.append(sid)
+        return expired_ids
+
+    def find_superseding_account(self, account_id: int) -> Optional[dict]:
+        """
+        若存在同一 wechat_id、且 last_login_at 更新的账号，返回该账号（表示当前槽位已被顶替）。
+        """
+        account = self.get_account(account_id)
+        if not account:
+            return None
+        identity = (account.get("wechat_id") or "").strip()
+        if not identity:
+            return None
+        current_login = account.get("last_login_at") or ""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM accounts "
+                "WHERE id != ? AND wechat_id = ? "
+                "AND last_login_at IS NOT NULL AND last_login_at > ? "
+                "ORDER BY last_login_at DESC LIMIT 1",
+                (account_id, identity, current_login),
+            ).fetchone()
+        return dict(row) if row else None
+
     def delete_account(self, account_id: int) -> bool:
         """删除账号及其Cookie文件"""
         account = self.get_account(account_id)
@@ -232,6 +302,50 @@ class WeixinDAO:
             conn.execute("DELETE FROM upload_tasks WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         return True
+
+    def delete_accounts(self, account_ids: list[int]) -> dict:
+        """
+        批量删除账号。有进行中上传任务的账号跳过。
+
+        Returns:
+            dict: {
+                "deleted": [int],
+                "skipped_active": [int],
+                "not_found": [int],
+            }
+        """
+        deleted: list[int] = []
+        skipped_active: list[int] = []
+        not_found: list[int] = []
+        # 去重且保持顺序
+        seen: set[int] = set()
+        ordered_ids: list[int] = []
+        for raw_id in account_ids:
+            try:
+                aid = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if aid in seen:
+                continue
+            seen.add(aid)
+            ordered_ids.append(aid)
+
+        for account_id in ordered_ids:
+            if not self.get_account(account_id):
+                not_found.append(account_id)
+                continue
+            if self.has_active_task(account_id):
+                skipped_active.append(account_id)
+                continue
+            if self.delete_account(account_id):
+                deleted.append(account_id)
+            else:
+                not_found.append(account_id)
+        return {
+            "deleted": deleted,
+            "skipped_active": skipped_active,
+            "not_found": not_found,
+        }
 
     def get_account_count(self) -> int:
         """获取账号总数"""

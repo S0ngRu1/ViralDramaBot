@@ -40,6 +40,11 @@ class AccountCreate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=50, description="账号名称（可选）")
 
 
+class AccountBatchDelete(BaseModel):
+    """批量删除账号请求"""
+    account_ids: list[int] = Field(..., min_length=1, description="待删除的账号 ID 列表")
+
+
 class AccountInfo(BaseModel):
     """账号信息"""
     id: int
@@ -165,3 +170,14 @@ class QRCodeResponse(BaseModel):
     qrcode_base64: Optional[str] = None
     status: str
     message: str
+
+
+class TrafficScanRequest(BaseModel):
+    """视频流量筛选扫描请求"""
+    grace_period_hours: int = Field(72, ge=0, le=24 * 365, description="发表后观察期（小时）")
+    min_views: int = Field(100, ge=0, description="播放量低于该值则命中低播放")
+
+
+class TrafficDeleteRequest(BaseModel):
+    """视频流量筛选删稿请求"""
+    post_ids: list[str] = Field(..., min_length=1, description="要删除的作品 objectId/exportId 列表")

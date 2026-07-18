@@ -85,12 +85,15 @@ from src.publishing.weixin.proxy import (
     _friendly_proxy_error,
 )
 from src.publishing.weixin.schemas import (
-    AccountCreate, AccountStatus, TaskStatus,
+    AccountCreate, AccountBatchDelete, AccountStatus, TaskStatus,
     BatchUploadCreate, ScheduleCreate,
     MetadataSource, TaskBatchDeleteRequest,
     ProxyProfileCreate, ProxyProfileUpdate,
     FavoriteLocationCreate,
+    TrafficScanRequest, TrafficDeleteRequest,
 )
+from src.publishing.weixin.traffic_filter import TrafficFilterService
+from src.publishing.weixin.traffic_dashboard import TrafficDashboardService, DEFAULT_HOURS as TRAFFIC_DASHBOARD_HOURS
 
 # ===== 统一数据目录 =====
 # DATA_DIR 已在导入微信模块前固定为 %APPDATA%\ViralDramaBot，禁止回退到项目 .data 或 ~/.viraldramabot_data。
@@ -390,6 +393,8 @@ weixin_account_mgr = AccountManager(weixin_dao)
 weixin_uploader = Uploader(weixin_dao)
 weixin_scheduler = UploadScheduler(weixin_dao)
 weixin_cookie_checker = CookieChecker(weixin_account_mgr)
+weixin_traffic_filter = TrafficFilterService(weixin_dao, weixin_account_mgr)
+weixin_traffic_dashboard = TrafficDashboardService(weixin_dao, weixin_account_mgr)
 
 
 # ============================================================================
@@ -1953,6 +1958,68 @@ async def weixin_delete_account(account_id: int) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/weixin/accounts/{account_id}/traffic/scan")
+async def weixin_traffic_scan(account_id: int, body: TrafficScanRequest) -> Dict[str, Any]:
+    """扫描低播放 / 作品优化建议候选视频（OR）"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    try:
+        result = await asyncio.to_thread(
+            weixin_traffic_filter.scan,
+            account_id,
+            body.grace_period_hours,
+            body.min_views,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"流量筛选扫描失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/accounts/{account_id}/traffic/delete")
+async def weixin_traffic_delete(account_id: int, body: TrafficDeleteRequest) -> Dict[str, Any]:
+    """删除勾选的候选视频"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    try:
+        result = await asyncio.to_thread(
+            weixin_traffic_filter.delete_posts,
+            account_id,
+            body.post_ids,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"流量筛选删稿失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/weixin/accounts/batch-delete")
+async def weixin_batch_delete_accounts(request: AccountBatchDelete) -> Dict[str, Any]:
+    """批量删除账号；有进行中上传任务的账号会跳过。"""
+    try:
+        result = weixin_account_mgr.delete_accounts(request.account_ids)
+        deleted = result.get("deleted") or []
+        skipped = result.get("skipped_active") or []
+        not_found = result.get("not_found") or []
+        parts = [f"删除 {len(deleted)} 个"]
+        if skipped:
+            parts.append(f"跳过进行中 {len(skipped)} 个")
+        if not_found:
+            parts.append(f"不存在 {len(not_found)} 个")
+        return {
+            "status": "success",
+            "message": "，".join(parts),
+            "deleted": deleted,
+            "skipped_active": skipped,
+            "not_found": not_found,
+        }
+    except Exception as e:
+        logger.error(f"批量删除账号失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---- 上传任务 ----
 
 @app.post("/api/weixin/upload/batch")
@@ -2434,6 +2501,27 @@ async def get_dashboard() -> Dict[str, Any]:
         }
     except Exception as e:
         logger.error(f"获取工作台概览失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dashboard/traffic")
+async def get_dashboard_traffic() -> Dict[str, Any]:
+    """返回近 24 小时流量缓存快照（不含实时拉取）。"""
+    try:
+        return weixin_traffic_dashboard.get_snapshot()
+    except Exception as e:
+        logger.error(f"读取流量快照失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dashboard/traffic/refresh")
+async def refresh_dashboard_traffic(hours: int = TRAFFIC_DASHBOARD_HOURS) -> Dict[str, Any]:
+    """后台刷新近 N 小时流量快照。"""
+    try:
+        hours = max(1, min(int(hours or TRAFFIC_DASHBOARD_HOURS), 24 * 14))
+        return weixin_traffic_dashboard.start_refresh(hours=hours)
+    except Exception as e:
+        logger.error(f"启动流量刷新失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
