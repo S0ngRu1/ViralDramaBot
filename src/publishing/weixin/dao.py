@@ -36,6 +36,7 @@ class WeixinDAO:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
                     wechat_id TEXT,
+                    avatar_url TEXT,
                     status TEXT NOT NULL DEFAULT 'expired',
                     cookie_path TEXT,
                     created_at TEXT NOT NULL,
@@ -109,9 +110,9 @@ class WeixinDAO:
                 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
                 CREATE INDEX IF NOT EXISTS idx_proxy_profiles_enabled ON proxy_profiles(enabled, id);
             """)
-            # 轻量迁移：老库的 upload_tasks 缺少代理审计列，需要补齐。
+            # 轻量迁移：老库缺少列时补齐。
             # SQLite 没有「ADD COLUMN IF NOT EXISTS」语法，所以先看 PRAGMA 再决定。
-            existing_cols = {
+            existing_task_cols = {
                 row["name"]
                 for row in conn.execute("PRAGMA table_info(upload_tasks)").fetchall()
             }
@@ -122,21 +123,38 @@ class WeixinDAO:
                 ("location_label", "TEXT"),
                 ("drama_link", "TEXT"),
             ):
-                if col_name not in existing_cols:
+                if col_name not in existing_task_cols:
                     conn.execute(f"ALTER TABLE upload_tasks ADD COLUMN {col_name} {col_def}")
+
+            existing_account_cols = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            if "avatar_url" not in existing_account_cols:
+                conn.execute("ALTER TABLE accounts ADD COLUMN avatar_url TEXT")
 
     # ==================== 账号操作 ====================
 
-    def create_account(self, name: str) -> int:
-        """创建账号，返回账号ID"""
+    def create_account(self, name: Optional[str] = None) -> int:
+        """创建账号，返回账号ID。名称缺省时使用占位名，登录后回写真实昵称。"""
         now = datetime.now().isoformat()
-        cookie_path = str(WeixinConfig.COOKIES_DIR / f"{name}_{now.replace(':', '-')}.json")
+        display_name = (name or "").strip() or WeixinConfig.DEFAULT_ACCOUNT_NAME
+        # cookie 路径先用临时名插入，拿到 id 后再改为 account_{id}.json
+        placeholder_cookie = str(
+            WeixinConfig.COOKIES_DIR / f"pending_{now.replace(':', '-')}.json"
+        )
         with self._get_conn() as conn:
             cursor = conn.execute(
                 "INSERT INTO accounts (name, status, cookie_path, created_at) VALUES (?, ?, ?, ?)",
-                (name, AccountStatus.EXPIRED.value, cookie_path, now),
+                (display_name, AccountStatus.EXPIRED.value, placeholder_cookie, now),
             )
-            return cursor.lastrowid
+            account_id = cursor.lastrowid
+            cookie_path = str(WeixinConfig.COOKIES_DIR / f"account_{account_id}.json")
+            conn.execute(
+                "UPDATE accounts SET cookie_path = ? WHERE id = ?",
+                (cookie_path, account_id),
+            )
+            return account_id
 
     def get_account(self, account_id: int) -> Optional[dict]:
         """获取单个账号"""
@@ -170,6 +188,35 @@ class WeixinDAO:
                     "UPDATE accounts SET status = ? WHERE id = ?",
                     (status.value, account_id),
                 )
+
+    def update_account_profile(
+        self,
+        account_id: int,
+        name: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        wechat_id: Optional[str] = None,
+    ) -> bool:
+        """回写登录后提取的视频号昵称、头像与 uniqId。"""
+        fields: list[str] = []
+        values: list[object] = []
+        if name is not None and str(name).strip():
+            fields.append("name = ?")
+            values.append(str(name).strip())
+        if avatar_url is not None and str(avatar_url).strip():
+            fields.append("avatar_url = ?")
+            values.append(str(avatar_url).strip())
+        if wechat_id is not None and str(wechat_id).strip():
+            fields.append("wechat_id = ?")
+            values.append(str(wechat_id).strip())
+        if not fields:
+            return False
+        values.append(account_id)
+        with self._get_conn() as conn:
+            conn.execute(
+                f"UPDATE accounts SET {', '.join(fields)} WHERE id = ?",
+                values,
+            )
+        return True
 
     def delete_account(self, account_id: int) -> bool:
         """删除账号及其Cookie文件"""

@@ -338,7 +338,8 @@ const api = {
 
     createWeixinAccount: async (name) => {
         try {
-            const response = await axios.post(`${API_BASE_URL}/weixin/accounts`, { name });
+            const payload = name ? { name } : {};
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts`, payload);
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
@@ -715,6 +716,14 @@ const app = createApp({
             accounts: 'accounts',
             proxies: 'proxies',
         }[page] || 'accounts');
+
+        // 桌面端 WebView2 与 DOM 脱钩：离开账号工作区时必须主动 hide，避免浮层盖住其它页
+        watch(currentPage, (page) => {
+            if (!['accounts', 'proxies'].includes(page)) {
+                const desktop = getDesktopApi();
+                if (desktop?.hideWeixinBrowser) desktop.hideWeixinBrowser();
+            }
+        });
 
         // 处理保存设置
         const handleSaveSettings = async (newSettings) => {
@@ -1976,7 +1985,7 @@ app.component('weixin-page', {
             <div v-if="tab === 'accounts'" class="account-workspace">
                 <div
                     v-if="refreshAllState.is_refreshing"
-                    class="card"
+                    class="card account-workspace-banner"
                     style="border-left: 4px solid #1890ff; background: #f0f9ff;"
                 >
                     <div class="flex-between">
@@ -2002,19 +2011,9 @@ app.component('weixin-page', {
                             </button>
                             <button
                                 class="account-add-button"
-                                @click="showAddAccount = true"
-                                :disabled="refreshAllState.is_refreshing"
-                            >＋ 添加</button>
-                        </div>
-                    </div>
-                    <div v-if="showAddAccount" class="inline-create-account">
-                        <div class="form-group">
-                            <label>账号名称</label>
-                            <input v-model="newAccountName" type="text" placeholder="给账号起个名字，如：我的视频号">
-                        </div>
-                        <div class="action-group">
-                            <button class="btn btn-secondary btn-small" @click="showAddAccount = false; newAccountName = ''">取消</button>
-                            <button class="btn btn-primary btn-small" @click="addAccount" :disabled="!newAccountName">创建并登录</button>
+                                @click="addAccount"
+                                :disabled="refreshAllState.is_refreshing || addingAccount"
+                            >{{ addingAccount ? '添加中...' : '＋ 添加' }}</button>
                         </div>
                     </div>
                     <div class="account-list" v-if="accounts.length">
@@ -2024,7 +2023,10 @@ app.component('weixin-page', {
                             :class="['account-list-item', { active: selectedAccount && selectedAccount.id === acc.id }]"
                             @click="selectAccount(acc)"
                         >
-                            <span class="account-avatar">{{ acc.name.slice(0, 1).toUpperCase() }}</span>
+                            <span class="account-avatar">
+                                <img v-if="acc.avatar_url" :src="acc.avatar_url" :alt="acc.name" />
+                                <template v-else>{{ (acc.name || '?').slice(0, 1).toUpperCase() }}</template>
+                            </span>
                             <span class="account-list-copy">
                                 <span class="account-list-name">{{ acc.name }}</span>
                                 <span class="account-list-meta">{{ acc.status === 'active' ? '已连接' : getStatusText(acc.status) }}</span>
@@ -2087,7 +2089,10 @@ app.component('weixin-page', {
                 <main v-if="selectedAccount" class="account-main-panel">
                     <div class="account-main-header">
                         <div class="account-heading">
-                            <span class="account-heading-avatar">{{ selectedAccount.name.slice(0, 1).toUpperCase() }}</span>
+                            <span class="account-heading-avatar">
+                                <img v-if="selectedAccount.avatar_url" :src="selectedAccount.avatar_url" :alt="selectedAccount.name" />
+                                <template v-else>{{ (selectedAccount.name || '?').slice(0, 1).toUpperCase() }}</template>
+                            </span>
                             <div>
                                 <div class="account-heading-name">{{ selectedAccount.name }}</div>
                                 <div class="account-heading-status">
@@ -2669,21 +2674,10 @@ app.component('weixin-page', {
                 </div>
             </div>
 
-            <!-- 添加账号弹窗 -->
-            <div v-if="false && showAddAccount" class="modal-overlay" @click.self="showAddAccount = false">
+            <!-- 添加账号弹窗（已改为点击「＋ 添加」直接创建并登录，保留占位避免破坏模板结构） -->
+            <div v-if="false" class="modal-overlay">
                 <div class="modal-box">
                     <h3>添加视频号账号</h3>
-                    <div class="form-group">
-                        <label>账号名称</label>
-                        <input v-model="newAccountName" type="text" placeholder="给账号起个名字，如：我的视频号1">
-                    </div>
-                    <p class="text-muted" style="font-size: 13px; margin-top: 8px;">
-                        创建后需要扫码登录才能使用。每个账号需要在微信中扫码确认。
-                    </p>
-                    <div class="modal-actions">
-                        <button class="btn btn-secondary" @click="showAddAccount = false">取消</button>
-                        <button class="btn btn-primary" @click="addAccount" :disabled="!newAccountName">创建并登录</button>
-                    </div>
                 </div>
             </div>
 
@@ -2757,6 +2751,7 @@ app.component('weixin-page', {
         const showAddAccount = ref(false);
         const showProxyModal = ref(false);
         const newAccountName = ref('');
+        const addingAccount = ref(false);
         const refreshingIds = ref(new Set());
         const isBrowsingBatchFiles = ref(false);
         const checkingAllProxies = ref(false);
@@ -3115,20 +3110,29 @@ app.component('weixin-page', {
         }
 
         async function addAccount() {
+            if (addingAccount.value || refreshAllState.is_refreshing) return;
+            addingAccount.value = true;
             try {
-                const created = await props.api.createWeixinAccount(newAccountName.value);
-                showAddAccount.value = false;
-                newAccountName.value = '';
+                const created = await props.api.createWeixinAccount();
                 await loadAccounts();
-                const account = created.account || accounts.value[0];
+                const account = created.account || accounts.value.find(a => a.id === created.account?.id) || accounts.value[0];
                 if (account) {
                     selectAccount(account);
                     accountDetailTab.value = 'manage';
-                    await loginAccount(account.id);
+                    if (hasNativeBrowser.value) {
+                        await startNativeWeixinBrowser(true);
+                        showMessage('账号已创建，请扫码登录', 'success');
+                    } else {
+                        await loginAccount(account.id);
+                        showMessage('账号已创建，请扫码登录', 'success');
+                    }
+                } else {
+                    showMessage('账号已创建', 'success');
                 }
-                showMessage('账号已创建，请点击"扫码登录"', 'success');
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
+            } finally {
+                addingAccount.value = false;
             }
         }
 
@@ -3353,6 +3357,12 @@ app.component('weixin-page', {
             if (!confirm('确定删除该账号？')) return;
             try {
                 await props.api.deleteWeixinAccount(id);
+                if (selectedAccount.value && Number(selectedAccount.value.id) === Number(id)) {
+                    await hideNativeWeixinBrowser();
+                    selectedAccount.value = null;
+                    accountDetailTab.value = 'upload';
+                    batchForm.account_id = '';
+                }
                 await loadAccounts();
                 showMessage('账号已删除', 'success');
             } catch (e) {
@@ -3540,6 +3550,11 @@ app.component('weixin-page', {
             activateTab(nextTab);
         });
 
+        // accounts/proxies 共用 weixin-page：切到代理页不会卸载组件，需主动 hide WebView2
+        watch(tab, (nextTab) => {
+            if (nextTab !== 'accounts') hideNativeWeixinBrowser();
+        });
+
         watch(accountDetailTab, (nextTab) => {
             if (nextTab !== 'manage') hideNativeWeixinBrowser();
         });
@@ -3591,7 +3606,7 @@ app.component('weixin-page', {
             favoriteLocations, newFavoriteLocation,
             showLocationDropdown, locationComboboxRef, filteredFavoriteLocations, selectFavoriteLocation,
             showProxyDropdown, proxyComboboxRef, selectedProxyDisplay, selectProxyProfile,
-            showAddAccount, showProxyModal, newAccountName, message, refreshingIds, loginModal, browserCanvasRef,
+            showAddAccount, showProxyModal, newAccountName, addingAccount, message, refreshingIds, loginModal, browserCanvasRef,
             browserHostRef, nativeBrowserVisible, hasNativeBrowser,
             isBrowsingBatchFiles, checkingAllProxies, refreshAllState,
             proxyForm, enabledProxyProfiles,
