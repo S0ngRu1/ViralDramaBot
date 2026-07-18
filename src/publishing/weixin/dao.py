@@ -260,6 +260,9 @@ class WeixinDAO:
         for row in rows:
             sibling = dict(row)
             sid = int(sibling["id"])
+            # 有进行中上传时勿删 Cookie，避免任务中途失会话
+            if self.has_active_task(sid):
+                continue
             cookie_path = sibling.get("cookie_path")
             if cookie_path:
                 Path(cookie_path).unlink(missing_ok=True)

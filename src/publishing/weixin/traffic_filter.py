@@ -1,7 +1,11 @@
 """
-视频流量筛选：低播放 OR 作品优化建议 → 候选列表 / 人工删稿
+视频流量筛选：按观察期 + 低播放筛选候选，支持人工删稿。
+扫描在后台线程执行，前端轮询结果。
 """
 
+from __future__ import annotations
+
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -10,77 +14,44 @@ from .account_manager import AccountManager, get_account_lock
 from .channel_post import ChannelPost, TrafficCandidate
 from .config import WeixinConfig
 from .dao import WeixinDAO
-from .notification import OptimizeTipNotice, fetch_optimize_tip_notices
 from .post_delete import delete_post
 from .post_list import fetch_posts
 from .schemas import AccountStatus
 from src.core.logger import logger
 
 REASON_LOW_VIEWS = "low_views"
-REASON_OPTIMIZE_TIP = "optimize_tip"
+
+DEFAULT_GRACE_PERIOD_HOURS = 48
+DEFAULT_MIN_VIEWS = 1000
 
 
 def merge_traffic_candidates(
     posts: List[ChannelPost],
-    tips: List[OptimizeTipNotice],
     grace_period_hours: int,
     min_views: int,
     now: Optional[datetime] = None,
 ) -> List[TrafficCandidate]:
-    """
-    OR 合并：
-    - 发表超过观察期且播放量 < 阈值
-    - 或消息中心有「作品优化建议」
-    """
+    """筛选：发表超过观察期且播放量 < 阈值。"""
     now = now or datetime.now()
     cutoff = now - timedelta(hours=max(0, int(grace_period_hours)))
     min_views = int(min_views)
 
-    by_id: Dict[str, TrafficCandidate] = {}
-
-    post_map = {p.post_id: p for p in posts}
-
+    results: List[TrafficCandidate] = []
     for post in posts:
         if post.published_at > cutoff:
             continue
         if post.view_count >= min_views:
             continue
-        cand = by_id.get(post.post_id)
-        if not cand:
-            cand = TrafficCandidate(
+        results.append(
+            TrafficCandidate(
                 post_id=post.post_id,
                 title=post.title,
                 published_at=post.published_at,
                 view_count=post.view_count,
-                reasons=[],
+                reasons=[REASON_LOW_VIEWS],
             )
-            by_id[post.post_id] = cand
-        if REASON_LOW_VIEWS not in cand.reasons:
-            cand.reasons.append(REASON_LOW_VIEWS)
+        )
 
-    for tip in tips:
-        post = post_map.get(tip.post_id)
-        cand = by_id.get(tip.post_id)
-        if not cand:
-            cand = TrafficCandidate(
-                post_id=tip.post_id,
-                title=(post.title if post else None) or tip.title or tip.post_id,
-                published_at=(post.published_at if post else None) or tip.published_at,
-                view_count=post.view_count if post else None,
-                reasons=[],
-            )
-            by_id[tip.post_id] = cand
-        else:
-            if (not cand.title or cand.title == cand.post_id) and tip.title:
-                cand.title = tip.title
-            if cand.published_at is None and tip.published_at is not None:
-                cand.published_at = tip.published_at
-            if cand.view_count is None and post is not None:
-                cand.view_count = post.view_count
-        if REASON_OPTIMIZE_TIP not in cand.reasons:
-            cand.reasons.append(REASON_OPTIMIZE_TIP)
-
-    results = list(by_id.values())
     results.sort(
         key=lambda c: (c.published_at or datetime.min, c.post_id),
         reverse=True,
@@ -99,7 +70,7 @@ def candidate_to_dict(c: TrafficCandidate) -> dict:
 
 
 class TrafficFilterService:
-    """单账号流量筛选与删稿"""
+    """单账号流量筛选与删稿（扫描后台执行）。"""
 
     def __init__(
         self,
@@ -108,6 +79,9 @@ class TrafficFilterService:
     ):
         self.dao = dao or WeixinDAO()
         self.account_manager = account_manager or AccountManager(self.dao)
+        self._jobs_lock = threading.Lock()
+        # account_id -> job state
+        self._scan_jobs: Dict[int, dict] = {}
 
     def _precheck(self, account_id: int) -> Optional[str]:
         if self.dao.has_active_task(account_id):
@@ -121,11 +95,118 @@ class TrafficFilterService:
             return "Cookie 文件不存在"
         return None
 
+    def get_scan_status(self, account_id: int) -> dict:
+        with self._jobs_lock:
+            job = self._scan_jobs.get(int(account_id))
+            if not job:
+                return {
+                    "status": "idle",
+                    "is_scanning": False,
+                    "message": "暂无扫描任务",
+                    "scanned": 0,
+                    "candidates": [],
+                }
+            return dict(job)
+
+    def _set_job(self, account_id: int, **fields) -> dict:
+        with self._jobs_lock:
+            job = self._scan_jobs.setdefault(int(account_id), {})
+            job.update(fields)
+            return dict(job)
+
+    def start_scan(
+        self,
+        account_id: int,
+        grace_period_hours: int = DEFAULT_GRACE_PERIOD_HOURS,
+        min_views: int = DEFAULT_MIN_VIEWS,
+    ) -> dict:
+        account_id = int(account_id)
+        skip = self._precheck(account_id)
+        if skip:
+            return {
+                "status": "error",
+                "is_scanning": False,
+                "message": skip,
+                "scanned": 0,
+                "candidates": [],
+            }
+
+        with self._jobs_lock:
+            current = self._scan_jobs.get(account_id) or {}
+            if current.get("is_scanning"):
+                return {
+                    "status": "running",
+                    "is_scanning": True,
+                    "message": "扫描已在进行中",
+                    "scanned": current.get("scanned") or 0,
+                    "candidates": current.get("candidates") or [],
+                }
+            # 在锁内标记 running，避免连点启动多个 worker。
+            # 重扫期间保留旧 candidates，供删稿白名单与前端展示，直到新结果写回。
+            job = self._scan_jobs.setdefault(account_id, {})
+            job.update(
+                {
+                    "status": "running",
+                    "is_scanning": True,
+                    "message": "后台扫描中…",
+                    "started_at": datetime.now().isoformat(),
+                    "finished_at": None,
+                }
+            )
+
+        thread = threading.Thread(
+            target=self._scan_worker,
+            args=(account_id, grace_period_hours, min_views),
+            name=f"TrafficScan-{account_id}",
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "status": "started",
+            "is_scanning": True,
+            "message": "扫描已在后台启动",
+            "scanned": 0,
+            "candidates": [],
+        }
+
+    def _scan_worker(
+        self,
+        account_id: int,
+        grace_period_hours: int,
+        min_views: int,
+    ) -> None:
+        try:
+            result = self.scan(
+                account_id,
+                grace_period_hours=grace_period_hours,
+                min_views=min_views,
+            )
+            self._set_job(
+                account_id,
+                status=result.get("status") or "error",
+                is_scanning=False,
+                message=result.get("message") or "",
+                finished_at=datetime.now().isoformat(),
+                scanned=result.get("scanned") or 0,
+                candidates=result.get("candidates") or [],
+            )
+        except Exception as e:
+            logger.exception("流量筛选扫描失败 account=%s", account_id)
+            self._set_job(
+                account_id,
+                status="error",
+                is_scanning=False,
+                message=str(e),
+                finished_at=datetime.now().isoformat(),
+                scanned=0,
+                candidates=[],
+            )
+
     def scan(
         self,
         account_id: int,
-        grace_period_hours: int = 72,
-        min_views: int = 100,
+        grace_period_hours: int = DEFAULT_GRACE_PERIOD_HOURS,
+        min_views: int = DEFAULT_MIN_VIEWS,
     ) -> dict:
         skip = self._precheck(account_id)
         if skip:
@@ -133,7 +214,6 @@ class TrafficFilterService:
                 "status": "error",
                 "message": skip,
                 "scanned": 0,
-                "optimize_tips": 0,
                 "candidates": [],
             }
 
@@ -143,7 +223,6 @@ class TrafficFilterService:
                 "status": "error",
                 "message": "账号锁被占用（可能正在上传或登录）",
                 "scanned": 0,
-                "optimize_tips": 0,
                 "candidates": [],
             }
 
@@ -161,16 +240,16 @@ class TrafficFilterService:
                     "status": "error",
                     "message": login.get("error") or "Cookie 已失效，请重新登录",
                     "scanned": 0,
-                    "optimize_tips": 0,
                     "candidates": [],
                 }
-            self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
+            # 仅复检 Cookie，勿刷新 last_login_at（避免打乱同微信号槽位）
+            self.dao.update_account_status(
+                account_id, AccountStatus.ACTIVE, touch_login_at=False
+            )
 
             posts = fetch_posts(page)
-            tips = fetch_optimize_tip_notices(page)
             candidates = merge_traffic_candidates(
                 posts,
-                tips,
                 grace_period_hours=grace_period_hours,
                 min_views=min_views,
             )
@@ -178,16 +257,14 @@ class TrafficFilterService:
                 "status": "success",
                 "message": "ok",
                 "scanned": len(posts),
-                "optimize_tips": len(tips),
                 "candidates": [candidate_to_dict(c) for c in candidates],
             }
         except Exception as e:
-            logger.exception(f"流量筛选扫描失败 account={account_id}")
+            logger.exception("流量筛选扫描失败 account=%s", account_id)
             return {
                 "status": "error",
                 "message": str(e),
                 "scanned": 0,
-                "optimize_tips": 0,
                 "candidates": [],
             }
         finally:
@@ -206,6 +283,33 @@ class TrafficFilterService:
         ids = [str(x).strip() for x in (post_ids or []) if str(x).strip()]
         if not ids:
             return {"status": "error", "message": "未选择要删除的视频", "deleted": [], "failed": []}
+
+        # 仅允许删除最近一次扫描命中的候选，降低误删/脚本乱删面
+        status = self.get_scan_status(account_id)
+        allowed = {
+            str(c.get("post_id") or "").strip()
+            for c in (status.get("candidates") or [])
+            if isinstance(c, dict) and c.get("post_id")
+        }
+        if not allowed:
+            return {
+                "status": "error",
+                "message": "请先扫描候选后再删除",
+                "deleted": [],
+                "failed": [{"post_id": pid, "error": "no_scan_candidates"} for pid in ids],
+            }
+        rejected = [pid for pid in ids if pid not in allowed]
+        ids = [pid for pid in ids if pid in allowed]
+        rejected_failed = [
+            {"post_id": pid, "error": "not_in_candidates"} for pid in rejected
+        ]
+        if not ids:
+            return {
+                "status": "error",
+                "message": "所选视频不在最近扫描候选中",
+                "deleted": [],
+                "failed": rejected_failed,
+            }
 
         lock = get_account_lock(account_id)
         if not lock.acquire(blocking=False):
@@ -234,7 +338,9 @@ class TrafficFilterService:
                     "deleted": [],
                     "failed": [{"post_id": pid, "error": "cookie_expired"} for pid in ids],
                 }
-            self.dao.update_account_status(account_id, AccountStatus.ACTIVE)
+            self.dao.update_account_status(
+                account_id, AccountStatus.ACTIVE, touch_login_at=False
+            )
 
             for pid in ids:
                 try:
@@ -246,19 +352,20 @@ class TrafficFilterService:
                 except Exception as e:
                     failed.append({"post_id": pid, "error": str(e)})
 
+            all_failed = rejected_failed + failed
             return {
-                "status": "success" if deleted and not failed else ("partial" if deleted else "error"),
-                "message": f"删除成功 {len(deleted)}，失败 {len(failed)}",
+                "status": "success" if deleted and not all_failed else ("partial" if deleted else "error"),
+                "message": f"删除成功 {len(deleted)}，失败 {len(all_failed)}",
                 "deleted": deleted,
-                "failed": failed,
+                "failed": all_failed,
             }
         except Exception as e:
-            logger.exception(f"流量筛选删稿失败 account={account_id}")
+            logger.exception("流量筛选删稿失败 account=%s", account_id)
             return {
                 "status": "error",
                 "message": str(e),
                 "deleted": deleted,
-                "failed": failed or [{"post_id": pid, "error": str(e)} for pid in ids],
+                "failed": rejected_failed + (failed or [{"post_id": pid, "error": str(e)} for pid in ids]),
             }
         finally:
             if page:

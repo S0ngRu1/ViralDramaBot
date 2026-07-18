@@ -91,6 +91,36 @@ class WeixinDAOTests(unittest.TestCase):
             self.assertFalse(cookie1.exists())
             self.assertTrue(cookie2.exists())
 
+    def test_invalidate_sibling_skips_active_upload(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db_path = Path(tmp) / "weixin.db"
+            cookies_dir = Path(tmp) / "cookies"
+            cookies_dir.mkdir()
+            dao = WeixinDAO(str(db_path))
+            from src.publishing.weixin.schemas import AccountStatus
+
+            a1 = dao.create_account("slot1")
+            a2 = dao.create_account("slot2")
+            cookie1 = cookies_dir / "a1.json"
+            cookie1.write_text("[]", encoding="utf-8")
+            with dao._get_conn() as conn:
+                conn.execute(
+                    "UPDATE accounts SET cookie_path=?, wechat_id=?, status=? WHERE id=?",
+                    (str(cookie1), "sphSAME", AccountStatus.ACTIVE.value, a1),
+                )
+                conn.execute(
+                    "UPDATE accounts SET wechat_id=?, status=? WHERE id=?",
+                    ("sphSAME", AccountStatus.ACTIVE.value, a2),
+                )
+            task_id = dao.create_task(account_id=a1, video_path=str(Path(tmp) / "v.mp4"))
+            dao.update_task_status(task_id, TaskStatus.UPLOADING)
+
+            expired = dao.invalidate_sibling_accounts(a2, "sphSAME")
+
+            self.assertEqual([], expired)
+            self.assertEqual(AccountStatus.ACTIVE.value, dao.get_account(a1)["status"])
+            self.assertTrue(cookie1.exists())
+
     def test_find_superseding_account_by_newer_login(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             db_path = Path(tmp) / "weixin.db"

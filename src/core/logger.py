@@ -123,6 +123,19 @@ class Logger:
                 pass
         self._emit(LogLevel.ERROR, message, context)
 
+    def exception(self, message: str, *args, context: Optional[Any] = None) -> None:
+        """记录异常（含 traceback），兼容标准 logging.Logger.exception。"""
+        import traceback
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        tb = traceback.format_exc()
+        if tb and tb.strip() != "NoneType: None":
+            message = f"{message}\n{tb}"
+        self._emit(LogLevel.ERROR, message, context)
+
     def debug(self, message: str, *args, context: Optional[Any] = None) -> None:
         if not self.debug_mode:
             return

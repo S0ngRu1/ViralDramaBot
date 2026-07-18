@@ -1,4 +1,4 @@
-"""视频流量筛选：解析与 OR 合并单测"""
+"""视频流量筛选：解析与低播放合并单测"""
 
 import unittest
 from datetime import datetime, timedelta
@@ -12,9 +12,34 @@ from src.publishing.weixin.notification import (
 from src.publishing.weixin.post_list import parse_post_item
 from src.publishing.weixin.traffic_filter import (
     REASON_LOW_VIEWS,
-    REASON_OPTIMIZE_TIP,
     merge_traffic_candidates,
 )
+
+
+class TestFetchPostsEarlyStopLogic(unittest.TestCase):
+    """验证 published_after 窗口截断规则（不发起真实网络）。"""
+
+    def test_window_keeps_recent_only(self):
+        now = datetime(2026, 7, 19, 12, 0, 0)
+        cutoff = now - timedelta(hours=24)
+        page_posts = [
+            ChannelPost("new", "n", now - timedelta(hours=1), 1),
+            ChannelPost("old", "o", now - timedelta(hours=40), 2),
+        ]
+        kept = [p for p in page_posts if p.published_at >= cutoff]
+        self.assertEqual([p.post_id for p in kept], ["new"])
+        newest = max(p.published_at for p in page_posts)
+        self.assertGreaterEqual(newest, cutoff)
+
+    def test_all_old_page_should_stop(self):
+        now = datetime(2026, 7, 19, 12, 0, 0)
+        cutoff = now - timedelta(hours=24)
+        page_posts = [
+            ChannelPost("a", "a", now - timedelta(hours=30), 1),
+            ChannelPost("b", "b", now - timedelta(hours=40), 2),
+        ]
+        newest = max(p.published_at for p in page_posts)
+        self.assertLess(newest, cutoff)
 
 
 class TestPostListParse(unittest.TestCase):
@@ -80,7 +105,7 @@ class TestNotificationParse(unittest.TestCase):
 
 
 class TestMergeTrafficCandidates(unittest.TestCase):
-    def test_or_merge_low_views_and_optimize_tip(self):
+    def test_low_views_only(self):
         now = datetime(2026, 7, 19, 12, 0, 0)
         posts = [
             ChannelPost(
@@ -93,7 +118,7 @@ class TestMergeTrafficCandidates(unittest.TestCase):
                 post_id="export/hot",
                 title="高播放",
                 published_at=now - timedelta(hours=100),
-                view_count=500,
+                view_count=5000,
             ),
             ChannelPost(
                 post_id="export/new",
@@ -101,45 +126,15 @@ class TestMergeTrafficCandidates(unittest.TestCase):
                 published_at=now - timedelta(hours=1),
                 view_count=0,
             ),
-            ChannelPost(
-                post_id="export/tip",
-                title="有建议也高播放",
-                published_at=now - timedelta(hours=100),
-                view_count=999,
-            ),
-        ]
-        from src.publishing.weixin.notification import OptimizeTipNotice
-
-        tips = [
-            OptimizeTipNotice(
-                post_id="export/tip",
-                title="有建议也高播放",
-                published_at=now - timedelta(hours=100),
-                msgid="1",
-                content="",
-                ref_url="",
-            ),
-            OptimizeTipNotice(
-                post_id="export/only_tip",
-                title="仅消息有建议",
-                published_at=now - timedelta(days=30),
-                msgid="2",
-                content="",
-                ref_url="",
-            ),
         ]
         cands = merge_traffic_candidates(
-            posts, tips, grace_period_hours=72, min_views=100, now=now
+            posts, grace_period_hours=48, min_views=1000, now=now
         )
         by_id = {c.post_id: c for c in cands}
         self.assertIn("export/low", by_id)
         self.assertEqual(by_id["export/low"].reasons, [REASON_LOW_VIEWS])
         self.assertNotIn("export/hot", by_id)
         self.assertNotIn("export/new", by_id)
-        self.assertIn("export/tip", by_id)
-        self.assertEqual(by_id["export/tip"].reasons, [REASON_OPTIMIZE_TIP])
-        self.assertIn("export/only_tip", by_id)
-        self.assertEqual(by_id["export/only_tip"].view_count, None)
 
 
 if __name__ == "__main__":

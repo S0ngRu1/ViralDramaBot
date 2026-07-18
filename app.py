@@ -1960,20 +1960,31 @@ async def weixin_delete_account(account_id: int) -> Dict[str, Any]:
 
 @app.post("/api/weixin/accounts/{account_id}/traffic/scan")
 async def weixin_traffic_scan(account_id: int, body: TrafficScanRequest) -> Dict[str, Any]:
-    """扫描低播放 / 作品优化建议候选视频（OR）"""
+    """后台启动低播放候选扫描（不阻塞等待）。"""
     account = weixin_dao.get_account(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
     try:
-        result = await asyncio.to_thread(
-            weixin_traffic_filter.scan,
+        return weixin_traffic_filter.start_scan(
             account_id,
             body.grace_period_hours,
             body.min_views,
         )
-        return result
     except Exception as e:
-        logger.error(f"流量筛选扫描失败: {e}")
+        logger.error(f"启动流量筛选扫描失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/weixin/accounts/{account_id}/traffic/scan-status")
+async def weixin_traffic_scan_status(account_id: int) -> Dict[str, Any]:
+    """查询流量筛选扫描进度/结果。"""
+    account = weixin_dao.get_account(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="账号不存在")
+    try:
+        return weixin_traffic_filter.get_scan_status(account_id)
+    except Exception as e:
+        logger.error(f"查询流量筛选状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

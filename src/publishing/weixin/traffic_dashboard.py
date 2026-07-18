@@ -1,5 +1,8 @@
 """
-概览页近 N 小时流量快照：账号播放汇总 + 按剧集链接（drama_link）排行。
+概览页近 N 小时流量快照：账号播放汇总 + 按描述首段剧集链接排行。
+
+post_list 无结构化剧集字段；上传时描述为「{剧集链接} {原描述}」或仅剧集链接，
+因此取描述空白符分割后的第一段作为剧集键。
 """
 
 from __future__ import annotations
@@ -15,25 +18,11 @@ from .channel_post import ChannelPost
 from .config import WeixinConfig
 from .dao import WeixinDAO
 from .post_list import fetch_posts
-from .schemas import AccountStatus, TaskStatus
+from .schemas import AccountStatus
 from src.core.logger import logger
 
 SNAPSHOT_FILENAME = "traffic_snapshot.json"
 DEFAULT_HOURS = 24
-MATCH_WINDOW = timedelta(hours=2)
-TASK_TIME_BUFFER = timedelta(hours=6)
-
-
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00").replace("+00:00", ""))
-    except ValueError:
-        return None
 
 
 def filter_posts_in_window(
@@ -46,53 +35,13 @@ def filter_posts_in_window(
     return [p for p in posts if p.published_at >= cutoff]
 
 
-def normalize_drama_link(value: Optional[str]) -> Optional[str]:
-    text = (value or "").strip()
-    return text or None
-
-
-def task_match_time(task: dict) -> Optional[datetime]:
-    """本地任务用于匹配的时间：优先 completed_at，其次 created_at。"""
-    return _parse_iso(task.get("completed_at")) or _parse_iso(task.get("created_at"))
-
-
-def match_posts_to_drama_tasks(
-    posts: List[ChannelPost],
-    tasks: List[dict],
-    match_window: timedelta = MATCH_WINDOW,
-) -> Dict[str, str]:
-    """
-    一对一匹配：平台作品 post_id -> drama_link。
-
-    仅使用有 drama_link 的任务；按 |published_at - task_time| 升序贪心配对，
-    且差值不超过 match_window。
-    """
-    indexed = []
-    for i, task in enumerate(tasks):
-        drama = normalize_drama_link(task.get("drama_link"))
-        t_at = task_match_time(task)
-        if not drama or t_at is None:
-            continue
-        indexed.append((i, drama, t_at))
-
-    candidates: List[Tuple[float, str, int, str]] = []
-    for post in posts:
-        for i, drama, t_at in indexed:
-            delta = abs((post.published_at - t_at).total_seconds())
-            if delta <= match_window.total_seconds():
-                candidates.append((delta, post.post_id, i, drama))
-    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
-
-    mapping: Dict[str, str] = {}
-    used_posts: set = set()
-    used_task_idx: set = set()
-    for _delta, post_id, task_idx, drama in candidates:
-        if post_id in used_posts or task_idx in used_task_idx:
-            continue
-        mapping[post_id] = drama
-        used_posts.add(post_id)
-        used_task_idx.add(task_idx)
-    return mapping
+def extract_drama_link_from_description(description: Optional[str]) -> Optional[str]:
+    """从视频描述提取剧集链接：空白符分割后的第一个非空字符串。"""
+    text = (description or "").strip()
+    if not text:
+        return None
+    token = text.split(None, 1)[0].strip()
+    return token or None
 
 
 def aggregate_account_stats(
@@ -112,13 +61,12 @@ def aggregate_account_stats(
 
 def aggregate_drama_stats(
     posts: List[ChannelPost],
-    post_to_drama: Dict[str, str],
     account_id: int,
 ) -> Dict[str, dict]:
-    """返回 drama_link -> 部分聚合（单账号），后续再跨账号合并。"""
+    """按描述首段剧集链接聚合（单账号），后续再跨账号合并。"""
     result: Dict[str, dict] = {}
     for post in posts:
-        drama = post_to_drama.get(post.post_id)
+        drama = extract_drama_link_from_description(post.title)
         if not drama:
             continue
         row = result.get(drama)
@@ -175,7 +123,6 @@ def build_snapshot_from_account_results(
             }
         )
     dramas.sort(key=lambda r: (r["total_views"], r["post_count"]), reverse=True)
-    dramas = dramas[:10]
 
     top_account = accounts[0] if accounts and accounts[0].get("total_views", 0) > 0 else None
     return {
@@ -190,7 +137,7 @@ def build_snapshot_from_account_results(
 
 
 class TrafficDashboardService:
-    """拉取平台播放量并与本地 drama_link 任务匹配，生成概览快照。"""
+    """拉取平台播放量，并从作品描述首段提取剧集链接生成概览快照。"""
 
     def __init__(
         self,
@@ -278,7 +225,6 @@ class TrafficDashboardService:
         try:
             snapshot = self.refresh_traffic_snapshot(hours=hours)
             self._snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-            # 落盘时去掉不可序列化字段（已无）
             self._snapshot_path.write_text(
                 json.dumps(snapshot, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -307,6 +253,11 @@ class TrafficDashboardService:
         account_rows: List[dict] = []
         drama_partials: List[Dict[str, dict]] = []
         errors: List[dict] = []
+        prev_accounts = {
+            int(a["account_id"]): a
+            for a in (self.get_snapshot().get("accounts") or [])
+            if a.get("account_id") is not None
+        }
 
         for account in accounts:
             account_id = int(account["id"])
@@ -317,8 +268,15 @@ class TrafficDashboardService:
                 if drama_part:
                     drama_partials.append(drama_part)
             except Exception as e:
+                err_text = str(e)
                 logger.warning(f"账号 {account_id} 流量扫描失败: {e}")
-                errors.append({"account_id": account_id, "account_name": name, "error": str(e)})
+                errors.append({"account_id": account_id, "account_name": name, "error": err_text})
+                # 锁冲突：沿用上次缓存，勿写入假 0 播放
+                if "账号锁被占用" in err_text and account_id in prev_accounts:
+                    cached = dict(prev_accounts[account_id])
+                    cached["account_name"] = name
+                    account_rows.append(cached)
+                    continue
                 account_rows.append(
                     {
                         "account_id": account_id,
@@ -359,29 +317,11 @@ class TrafficDashboardService:
                 self.dao.update_account_status(account_id, AccountStatus.EXPIRED)
                 raise RuntimeError(login.get("error") or "Cookie 已失效")
 
-            posts = fetch_posts(page)
+            # 只拉近 N 小时窗口附近的页，避免全量历史翻页
+            cutoff = now - timedelta(hours=max(0, int(hours)))
+            posts = fetch_posts(page, published_after=cutoff)
             posts_window = filter_posts_in_window(posts, hours=hours, now=now)
-
-            # 本地 completed + drama_link 任务（时间窗口加缓冲）
-            tasks = self.dao.get_tasks(
-                account_id=account_id,
-                status=TaskStatus.COMPLETED,
-                limit=500,
-            )
-            cutoff = now - timedelta(hours=hours) - TASK_TIME_BUFFER
-            drama_tasks = []
-            for t in tasks:
-                if not normalize_drama_link(t.get("drama_link")):
-                    continue
-                t_at = task_match_time(t)
-                if t_at is None:
-                    continue
-                if t_at < cutoff:
-                    continue
-                drama_tasks.append(t)
-
-            mapping = match_posts_to_drama_tasks(posts_window, drama_tasks)
-            drama_part = aggregate_drama_stats(posts_window, mapping, account_id)
+            drama_part = aggregate_drama_stats(posts_window, account_id)
             return posts_window, drama_part
         finally:
             if page:

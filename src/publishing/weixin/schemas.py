@@ -174,10 +174,15 @@ class QRCodeResponse(BaseModel):
 
 class TrafficScanRequest(BaseModel):
     """视频流量筛选扫描请求"""
-    grace_period_hours: int = Field(72, ge=0, le=24 * 365, description="发表后观察期（小时）")
-    min_views: int = Field(100, ge=0, description="播放量低于该值则命中低播放")
+    grace_period_hours: int = Field(48, ge=0, le=24 * 365, description="发表后观察期（小时）")
+    min_views: int = Field(1000, ge=0, description="播放量低于该值则命中低播放")
 
 
 class TrafficDeleteRequest(BaseModel):
     """视频流量筛选删稿请求"""
-    post_ids: list[str] = Field(..., min_length=1, description="要删除的作品 objectId/exportId 列表")
+    post_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="要删除的作品 objectId/exportId 列表（需属于最近一次扫描候选）",
+    )

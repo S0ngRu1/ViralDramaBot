@@ -461,6 +461,17 @@ const api = {
         }
     },
 
+    getWeixinTrafficScanStatus: async (accountId) => {
+        try {
+            const response = await axios.get(
+                `${API_BASE_URL}/weixin/accounts/${accountId}/traffic/scan-status`
+            );
+            return response.data;
+        } catch (error) {
+            throw error.response?.data || error.message;
+        }
+    },
+
     deleteWeixinTrafficPosts: async (accountId, postIds) => {
         try {
             const response = await axios.post(
@@ -576,6 +587,63 @@ const api = {
 };
 
 // ============================================================================
+// 应用内确认框 / 全局提示（避免浏览器原生 confirm/alert 显示 127.0.0.1）
+// ============================================================================
+
+const appConfirmState = reactive({
+    show: false,
+    title: '确认',
+    message: '',
+    confirmText: '确定',
+    cancelText: '取消',
+    danger: true,
+    _resolve: null,
+});
+
+/**
+ * 应用内确认对话框，返回 Promise<boolean>
+ * @param {string|{title?:string,message:string,confirmText?:string,cancelText?:string,danger?:boolean}} options
+ */
+function appConfirm(options) {
+    const opts = typeof options === 'string' ? { message: options } : (options || {});
+    return new Promise((resolve) => {
+        if (appConfirmState._resolve) {
+            appConfirmState._resolve(false);
+        }
+        // 桌面端原生 WebView2 会盖住 HTML 弹窗，确认前先隐藏
+        const desktop = typeof getDesktopApi === 'function' ? getDesktopApi() : null;
+        if (desktop?.hideWeixinBrowser) {
+            try { desktop.hideWeixinBrowser(); } catch (_) {}
+        }
+        appConfirmState.show = true;
+        appConfirmState.title = opts.title || '确认';
+        appConfirmState.message = opts.message || '';
+        appConfirmState.confirmText = opts.confirmText || '确定';
+        appConfirmState.cancelText = opts.cancelText || '取消';
+        appConfirmState.danger = opts.danger !== false;
+        appConfirmState._resolve = resolve;
+    });
+}
+
+function resolveAppConfirm(ok) {
+    appConfirmState.show = false;
+    const resolve = appConfirmState._resolve;
+    appConfirmState._resolve = null;
+    if (resolve) resolve(!!ok);
+}
+
+let _appNotifyImpl = null;
+
+function appNotify(message, type = 'info') {
+    const normalized = type === 'error' ? 'danger' : (type || 'info');
+    if (_appNotifyImpl) {
+        _appNotifyImpl(message, normalized);
+        return;
+    }
+    console.log(`[${normalized}]`, message);
+}
+
+// ============================================================================
 // Vue 应用
 // ============================================================================
 
@@ -662,6 +730,7 @@ const app = createApp({
                     <dashboard-page
                         :api="api"
                         @navigate="currentPage = $event"
+                        @notify="(payload) => showMessage(payload.message, payload.type || 'info')"
                     />
                 </div>
 
@@ -703,6 +772,34 @@ const app = createApp({
                 <!-- 运行日志页面 -->
                 <div v-if="currentPage === 'logs'">
                     <logs-page :api="api" />
+                </div>
+            </div>
+        </div>
+
+        <div class="app-toast-stack">
+            <div
+                v-for="msg in messages"
+                :key="msg.id"
+                :class="['alert', 'alert-' + msg.type, 'app-toast']"
+            >{{ msg.message }}</div>
+        </div>
+
+        <div
+            v-if="appConfirmState.show"
+            class="modal-overlay app-confirm-overlay"
+            @click.self="resolveAppConfirm(false)"
+        >
+            <div class="modal-box">
+                <h3>{{ appConfirmState.title }}</h3>
+                <p class="app-confirm-message">{{ appConfirmState.message }}</p>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" @click="resolveAppConfirm(false)">
+                        {{ appConfirmState.cancelText }}
+                    </button>
+                    <button
+                        :class="['btn', appConfirmState.danger ? 'btn-danger' : 'btn-primary']"
+                        @click="resolveAppConfirm(true)"
+                    >{{ appConfirmState.confirmText }}</button>
                 </div>
             </div>
         </div>
@@ -755,12 +852,14 @@ const app = createApp({
 
         // 显示消息
         const showMessage = (message, type = 'info') => {
+            const normalized = type === 'error' ? 'danger' : (type || 'info');
             const id = Date.now();
-            messages.value.push({ id, message, type });
+            messages.value.push({ id, message, type: normalized });
             setTimeout(() => {
                 messages.value = messages.value.filter(m => m.id !== id);
             }, 3000);
         };
+        _appNotifyImpl = showMessage;
 
         const handleDownloadCompleted = () => {
             loadVideos();
@@ -807,6 +906,8 @@ const app = createApp({
             videos,
             settings,
             messages,
+            appConfirmState,
+            resolveAppConfirm,
             api,
             loadVideos,
             loadSettings,
@@ -824,7 +925,7 @@ const app = createApp({
 
 app.component('dashboard-page', {
     props: ['api'],
-    emits: ['navigate'],
+    emits: ['navigate', 'notify'],
     template: `
         <div>
             <div class="header">
@@ -839,7 +940,7 @@ app.component('dashboard-page', {
             </div>
 
             <div v-if="dashboard">
-                <div class="row">
+                <div class="row dashboard-metric-row">
                     <div class="col">
                         <div class="card">
                             <div class="card-title">素材库存</div>
@@ -872,26 +973,12 @@ app.component('dashboard-page', {
                             <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'proxies')">代理与位置</button>
                         </div>
                     </div>
-                </div>
-
-                <div class="row">
-                    <div class="col">
-                        <div class="card">
-                            <div class="card-title">下载状态</div>
-                            <p><strong>{{ dashboard.download?.status || 'idle' }}</strong> · {{ dashboard.download?.message || '就绪' }}</p>
-                            <div class="progress-bar" style="margin: 12px 0;">
-                                <div class="progress-fill" :style="{ width: (dashboard.download?.percentage || 0) + '%' }"></div>
-                            </div>
-                            <p class="text-muted">{{ dashboard.download?.percentage || 0 }}%</p>
-                            <button class="btn btn-primary btn-small" @click="$emit('navigate', 'download')">素材下载</button>
-                        </div>
-                    </div>
                     <div class="col">
                         <div class="card">
                             <div class="card-title">上传队列</div>
-                            <p>运行中：{{ queueValue('running') ? '是' : '否' }}</p>
-                            <p class="text-muted">等待 {{ queueValue('pending_count') || 0 }} / 活动 {{ queueValue('active_count') || 0 }}</p>
-                            <button class="btn btn-primary btn-small" @click="$emit('navigate', 'accounts')">进入账号管理</button>
+                            <div style="font-size: 32px; font-weight: 700;">{{ queuePending }}</div>
+                            <p class="text-muted">等待中 · {{ queueRunning ? '有任务运行' : '空闲' }}</p>
+                            <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'accounts')">进入账号管理</button>
                         </div>
                     </div>
                 </div>
@@ -901,7 +988,8 @@ app.component('dashboard-page', {
                         <div>
                             <div class="card-title" style="margin-bottom: 4px;">近 24 小时流量</div>
                             <p class="text-muted" style="font-size: 12px; margin: 0;">
-                                平台播放量汇总；剧集排行仅统计上传时填写了「剧集链接」且能匹配到的视频。
+                                平台播放量汇总；剧集排行取作品描述空白符分割后的第一段（上传时会写成「剧集链接 + 原描述」）。
+                                刷新在后台执行，可继续浏览其它页面。
                                 <span v-if="traffic?.refreshed_at">缓存时间：{{ formatTrafficTime(traffic.refreshed_at) }}</span>
                                 <span v-else>暂无缓存</span>
                             </p>
@@ -910,7 +998,7 @@ app.component('dashboard-page', {
                             class="btn btn-primary btn-small"
                             :disabled="trafficRefreshing || traffic?.is_refreshing"
                             @click="refreshTraffic"
-                        >{{ (trafficRefreshing || traffic?.is_refreshing) ? '刷新中...' : '刷新流量数据' }}</button>
+                        >{{ (trafficRefreshing || traffic?.is_refreshing) ? '后台刷新中...' : '刷新流量数据' }}</button>
                     </div>
 
                     <div v-if="traffic?.top_account" class="alert alert-info" style="margin-bottom: 14px;">
@@ -976,7 +1064,7 @@ app.component('dashboard-page', {
                                     </tbody>
                                 </table>
                             </div>
-                            <div v-else class="empty-state" style="padding: 24px 0;">暂无剧集排行（需上传时填写剧集链接）</div>
+                            <div v-else class="empty-state" style="padding: 24px 0;">暂无剧集排行（需描述以剧集链接开头）</div>
                         </div>
                     </div>
                 </div>
@@ -984,7 +1072,7 @@ app.component('dashboard-page', {
             </div>
         </div>
     `,
-    setup(props) {
+    setup(props, { emit }) {
         const dashboard = ref(null);
         const traffic = ref(null);
         const loading = ref(false);
@@ -995,6 +1083,12 @@ app.component('dashboard-page', {
 
         const trafficAccounts = computed(() => traffic.value?.accounts || []);
         const trafficDramas = computed(() => traffic.value?.dramas || []);
+        const queuePending = computed(() => Number(dashboard.value?.queue?.pending || 0));
+        const queueRunning = computed(() => Boolean(dashboard.value?.queue?.current));
+
+        const notify = (message, type = 'info') => {
+            emit('notify', { message, type });
+        };
 
         const loadDashboard = async () => {
             loading.value = true;
@@ -1027,25 +1121,58 @@ app.component('dashboard-page', {
         const startTrafficPoll = () => {
             stopTrafficPoll();
             let ticks = 0;
+            // 多账号无头浏览器刷新可能很长：约 30 分钟（900 * 2s）
+            const maxTicks = 900;
             trafficPollTimer = setInterval(async () => {
                 ticks += 1;
-                await loadTraffic();
-                if (!traffic.value?.is_refreshing || ticks >= 90) {
-                    trafficRefreshing.value = false;
+                try {
+                    await loadTraffic();
+                    if (traffic.value?.is_refreshing) {
+                        trafficRefreshing.value = true;
+                        if (ticks < maxTicks) return;
+                        // 超时停轮询并解锁按钮；后台若仍在跑，稍后回概览会自动续轮询
+                        stopTrafficPoll();
+                        trafficRefreshing.value = false;
+                        notify('流量刷新耗时较长，可稍后回到概览查看或再次刷新', 'warning');
+                        return;
+                    }
                     stopTrafficPoll();
+                    trafficRefreshing.value = false;
+                    if (traffic.value?.last_error) {
+                        notify(traffic.value.last_error, 'error');
+                    } else if (traffic.value?.refreshed_at) {
+                        notify(
+                            `流量刷新完成：账号 ${trafficAccounts.value.length}，剧集 ${trafficDramas.value.length}`,
+                            'success'
+                        );
+                    }
+                } catch (e) {
+                    if (ticks >= maxTicks) {
+                        stopTrafficPoll();
+                        trafficRefreshing.value = false;
+                        notify('流量刷新状态查询失败', 'error');
+                    }
                 }
-            }, 3000);
+            }, 2000);
         };
 
         const refreshTraffic = async () => {
+            if (trafficRefreshing.value || traffic.value?.is_refreshing) return;
             trafficRefreshing.value = true;
             try {
-                await props.api.refreshDashboardTraffic(24);
+                const res = await props.api.refreshDashboardTraffic(24);
+                if (res.status === 'error') {
+                    trafficRefreshing.value = false;
+                    notify(res.message || '启动刷新失败', 'error');
+                    return;
+                }
+                notify(res.message || '流量刷新已在后台启动', 'info');
+                // 立即拉一次快照（标记 is_refreshing），再轮询直到完成
                 await loadTraffic();
                 startTrafficPoll();
             } catch (err) {
                 trafficRefreshing.value = false;
-                error.value = getErrorMessage(err);
+                notify(getErrorMessage(err), 'error');
             }
         };
 
@@ -1059,7 +1186,43 @@ app.component('dashboard-page', {
         };
 
         const statusCount = (stats, key) => Number(stats?.[key] || 0);
-        const queueValue = (key) => dashboard.value?.queue?.[key];
+
+        const scheduleAutoTrafficAfterAccountRefresh = () => {
+            // 打开应用后仅自动刷新一次：必须等启动全量账号刷新结束后再拉流量
+            if (window.__vdbTrafficAutoRefreshed || window.__vdbTrafficAutoWaitTimer) {
+                return;
+            }
+            let sawAccountRefreshing = false;
+            let idleTicks = 0;
+            window.__vdbTrafficAutoWaitTimer = setInterval(async () => {
+                try {
+                    const res = await props.api.getWeixinAccountsRefreshStatus();
+                    if (res?.is_refreshing) {
+                        sawAccountRefreshing = true;
+                        idleTicks = 0;
+                        return;
+                    }
+                    // 已见过刷新中 → 刚结束：可以刷流量
+                    // 或长时间未见刷新启动（无账号/刷新被跳过）：超时后仍刷一次
+                    const ready = sawAccountRefreshing || idleTicks >= 40; // ~60s
+                    idleTicks += 1;
+                    if (!ready) return;
+                    clearInterval(window.__vdbTrafficAutoWaitTimer);
+                    window.__vdbTrafficAutoWaitTimer = null;
+                    if (window.__vdbTrafficAutoRefreshed) return;
+                    window.__vdbTrafficAutoRefreshed = true;
+                    refreshTraffic();
+                } catch (_) {
+                    idleTicks += 1;
+                    if (idleTicks < 40) return;
+                    clearInterval(window.__vdbTrafficAutoWaitTimer);
+                    window.__vdbTrafficAutoWaitTimer = null;
+                    if (window.__vdbTrafficAutoRefreshed) return;
+                    window.__vdbTrafficAutoRefreshed = true;
+                    refreshTraffic();
+                }
+            }, 1500);
+        };
 
         onMounted(async () => {
             await Promise.all([loadDashboard(), loadTraffic()]);
@@ -1067,11 +1230,15 @@ app.component('dashboard-page', {
             if (traffic.value?.is_refreshing) {
                 trafficRefreshing.value = true;
                 startTrafficPoll();
+                window.__vdbTrafficAutoRefreshed = true;
+            } else {
+                scheduleAutoTrafficAfterAccountRefresh();
             }
         });
         onBeforeUnmount(() => {
             if (timer) clearInterval(timer);
             stopTrafficPoll();
+            // 不清理 __vdbTrafficAutoWaitTimer：应用级只触发一次，离开概览仍可继续等到账号刷新结束
         });
 
         return {
@@ -1079,14 +1246,15 @@ app.component('dashboard-page', {
             traffic,
             trafficAccounts,
             trafficDramas,
+            queuePending,
+            queueRunning,
             loading,
             trafficRefreshing,
             error,
             loadDashboard,
             refreshTraffic,
             formatTrafficTime,
-            statusCount,
-            queueValue
+            statusCount
         };
     }
 });
@@ -1406,7 +1574,7 @@ app.component('download-page', {
         const submit = async () => {
             if (validItems.value.length === 0) return;
             if (validItems.value.length > MAX_BATCH_ITEMS) {
-                alert(`单次最多支持 ${MAX_BATCH_ITEMS} 条下载任务`);
+                appNotify(`单次最多支持 ${MAX_BATCH_ITEMS} 条下载任务`, 'warning');
                 return;
             }
 
@@ -1651,20 +1819,29 @@ app.component('videos-page', {
         };
 
         const deleteVideo = async (videoId) => {
-            if (confirm('确定要删除这个视频吗？')) {
-                try {
-                    await props.api.deleteVideo(videoId);
-                    reload();
-                    alert('✅ 视频已删除');
-                } catch (error) {
-                    alert('❌ 删除失败: ' + (error.message || error));
-                }
+            const ok = await appConfirm({
+                title: '删除视频',
+                message: '确定要删除这个视频吗？',
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
+            try {
+                await props.api.deleteVideo(videoId);
+                reload();
+                appNotify('视频已删除', 'success');
+            } catch (error) {
+                appNotify('删除失败: ' + (error.message || error), 'error');
             }
         };
 
         const deleteSelected = async () => {
             if (selectedIds.value.length === 0) return;
-            if (!confirm(`确定要删除选中的 ${selectedIds.value.length} 个视频吗？`)) return;
+            const ok = await appConfirm({
+                title: '批量删除视频',
+                message: `确定要删除选中的 ${selectedIds.value.length} 个视频吗？`,
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
 
             try {
                 await props.api.batchDeleteVideos(selectedIds.value);
@@ -1678,7 +1855,7 @@ app.component('videos-page', {
                     batchActionTimer = null;
                 }, 2000);
             } catch (error) {
-                alert('❌ 批量删除失败: ' + (error.message || error));
+                appNotify('批量删除失败: ' + (error.message || error), 'error');
             }
         };
 
@@ -1686,7 +1863,7 @@ app.component('videos-page', {
             try {
                 await props.api.openVideo(videoId);
             } catch (error) {
-                alert('❌ 打开视频失败: ' + (error.message || error));
+                appNotify('打开视频失败: ' + (error.message || error), 'error');
             }
         };
 
@@ -1694,7 +1871,7 @@ app.component('videos-page', {
             try {
                 await props.api.openVideoFolder(videoId);
             } catch (error) {
-                alert('❌ 打开文件夹失败: ' + (error.message || error));
+                appNotify('打开文件夹失败: ' + (error.message || error), 'error');
             }
         };
 
@@ -1710,7 +1887,7 @@ app.component('videos-page', {
                     copyHintTimer = null;
                 }, 2000);
             } catch (error) {
-                alert('❌ 复制路径失败: ' + (error.message || error));
+                appNotify('复制路径失败: ' + (error.message || error), 'error');
             }
         };
 
@@ -2035,7 +2212,7 @@ app.component('settings-page', {
                     localStorage.setItem(DOWNLOAD_SAVE_PATH_KEY, result.path);
                 }
             } catch (error) {
-                alert('❌ 选择目录失败: ' + (error.message || error));
+                appNotify('选择目录失败: ' + (error.message || error), 'error');
             } finally {
                 isBrowsing.value = false;
             }
@@ -2045,7 +2222,7 @@ app.component('settings-page', {
             try {
                 emit('save', formData);
             } catch (error) {
-                alert('❌ 保存失败: ' + (error.message || error));
+                appNotify('保存失败: ' + (error.message || error), 'error');
             }
         };
 
@@ -2088,14 +2265,19 @@ app.component('settings-page', {
         const runCleanup = async () => {
             if (isCleaning.value) return;
             if (!cleanupForm.logs && !cleanupForm.cache && !cleanupForm.upload_history) {
-                alert('请至少选择一个清理项');
+                appNotify('请至少选择一个清理项', 'warning');
                 return;
             }
             const items = [];
             if (cleanupForm.logs) items.push('日志');
             if (cleanupForm.cache) items.push('缓存');
             if (cleanupForm.upload_history) items.push('历史视频上传记录');
-            if (!confirm(`确定清理：${items.join('、')}？\n\n不会删除账号、Cookie 或本地视频文件。`)) return;
+            const ok = await appConfirm({
+                title: '清理确认',
+                message: `确定清理：${items.join('、')}？\n\n不会删除账号、Cookie 或本地视频文件。`,
+                confirmText: '确定清理',
+            });
+            if (!ok) return;
 
             isCleaning.value = true;
             cleanupResult.value = '';
@@ -2190,31 +2372,24 @@ app.component('weixin-page', {
 
             <!-- 账号管理 -->
             <div v-if="tab === 'accounts'" class="account-workspace">
-                <div
-                    v-if="refreshAllState.is_refreshing"
-                    class="card account-workspace-banner"
-                    style="border-left: 4px solid #1890ff; background: #f0f9ff;"
-                >
-                    <div class="flex-between">
-                        <strong>🔄 正在批量刷新账号状态…</strong>
-                        <span class="spinner"></span>
-                    </div>
-                </div>
                 <aside class="account-list-panel">
                     <div class="account-list-header">
                         <div>
                             <div class="account-list-kicker">账号中心</div>
                             <div class="account-list-title">视频号账号</div>
+                            <div v-if="refreshAllState.is_refreshing" class="account-refresh-hint">
+                                正在批量刷新账号状态…
+                            </div>
                         </div>
                         <div class="account-list-actions">
                             <button
                                 class="icon-button"
+                                :class="{ 'is-loading': refreshAllState.is_refreshing }"
                                 @click="triggerRefreshAll"
                                 :disabled="refreshAllState.is_refreshing"
                                 title="刷新账号状态"
                             >
-                                <span v-if="refreshAllState.is_refreshing" class="spinner"></span>
-                                <span v-else>↻</span>
+                                <span class="refresh-icon">↻</span>
                             </button>
                             <button
                                 class="account-add-button"
@@ -2567,13 +2742,13 @@ app.component('weixin-page', {
                         <div class="pane-toolbar">
                             <div>
                                 <h2>视频流量筛选</h2>
-                                <p>筛选低播放或有「作品优化建议」的视频，勾选后删除</p>
+                                <p>筛选发表超过观察期且播放量低于阈值的视频，勾选后删除。</p>
                             </div>
                             <div class="action-group">
                                 <span v-if="selectedTrafficIds.length" class="text-muted">已选 {{ selectedTrafficIds.length }} 项</span>
                                 <button
                                     class="btn btn-danger btn-small"
-                                    :disabled="!selectedTrafficIds.length || trafficDeleting"
+                                    :disabled="!selectedTrafficIds.length || trafficDeleting || trafficScanning"
                                     @click="deleteSelectedTrafficPosts"
                                 >{{ trafficDeleting ? '删除中...' : '删除选中' }}</button>
                             </div>
@@ -2598,13 +2773,13 @@ app.component('weixin-page', {
                                         class="btn btn-primary btn-block"
                                         :disabled="trafficScanning || !selectedAccount || selectedAccount.status !== 'active'"
                                         @click="scanTrafficCandidates"
-                                    >{{ trafficScanning ? '扫描中...' : '扫描候选' }}</button>
+                                    >{{ trafficScanning ? '后台扫描中...' : '扫描候选' }}</button>
                                 </div>
                             </div>
                         </div>
                         <p class="text-muted" style="font-size:12px;margin-bottom:14px;">
-                            命中规则：发表超过观察期且播放量低于阈值，或消息中心有「作品优化建议」（满足其一即可）。
-                            <span v-if="trafficScanMeta.scanned != null">最近扫描：作品 {{ trafficScanMeta.scanned }}，优化建议 {{ trafficScanMeta.optimize_tips }}，候选 {{ trafficCandidates.length }}。</span>
+                            扫描在后台执行，可继续操作其它页面。
+                            <span v-if="trafficScanMeta.scanned != null">最近扫描：作品 {{ trafficScanMeta.scanned }}，候选 {{ trafficCandidates.length }}。</span>
                         </p>
                         <div v-if="trafficCandidates.length" class="account-task-table-wrap">
                             <table class="table account-task-table">
@@ -2646,7 +2821,7 @@ app.component('weixin-page', {
                                             <button
                                                 class="btn btn-danger btn-small"
                                                 :disabled="trafficDeleting"
-                                                @click="deleteTrafficPosts([item.post_id])"
+                                                @click="deleteOneTrafficPost(item)"
                                             >删除</button>
                                         </td>
                                     </tr>
@@ -3130,15 +3305,16 @@ app.component('weixin-page', {
         const selectedAccountIds = ref([]);
         const accountDetailTab = ref('upload');
         const trafficFilter = reactive({
-            grace_period_hours: 72,
-            min_views: 100,
+            grace_period_hours: 48,
+            min_views: 1000,
         });
         const trafficCandidates = ref([]);
         const selectedTrafficIds = ref([]);
         const trafficScanning = ref(false);
         const trafficDeleting = ref(false);
         const trafficScannedOnce = ref(false);
-        const trafficScanMeta = reactive({ scanned: null, optimize_tips: null });
+        const trafficScanMeta = reactive({ scanned: null });
+        let trafficScanPollTimer = null;
         const schedules = ref([]);
         const proxyProfiles = ref([]);
         const favoriteLocations = ref([]);
@@ -3206,7 +3382,7 @@ app.component('weixin-page', {
         let refreshPollTimer = null;
 
         const DEFAULT_BATCH_DESCRIPTION = '#ys点击上方❤【免费剧集】0元看全集';
-        const DEFAULT_LOCATION_LABEL = '樱桃沟管委会西胡垌社区党群服务中心';
+        const DEFAULT_LOCATION_LABEL = '樱桃沟管委会西胡垌社区综合性文化服务中心';
         const batchForm = reactive({
             account_id: '',
             videoFiles: [],
@@ -3251,16 +3427,44 @@ app.component('weixin-page', {
             return a ? a.name : '#' + id;
         }
 
+        async function syncTrafficScanState(accountId) {
+            if (!accountId) return;
+            try {
+                const res = await props.api.getWeixinTrafficScanStatus(accountId);
+                if (res.is_scanning) {
+                    trafficScanning.value = true;
+                    startTrafficScanPoll(accountId);
+                    return;
+                }
+                trafficScanning.value = false;
+                if (res.status === 'success' || (res.candidates && res.candidates.length)) {
+                    trafficScannedOnce.value = true;
+                    trafficScanMeta.scanned = res.scanned ?? null;
+                    trafficCandidates.value = res.candidates || [];
+                }
+            } catch (_) {
+                // 同步失败不打断账号切换
+            }
+        }
+
         function selectAccount(acc) {
             hideNativeWeixinBrowser();
+            const prevId = selectedAccount.value?.id;
             selectedAccount.value = acc;
             accountDetailTab.value = 'upload';
             batchForm.account_id = acc.id;
-            trafficCandidates.value = [];
+            // 同一账号重选：保留候选与轮询，避免后台扫描被 UI 掐断
+            if (prevId != null && Number(prevId) === Number(acc.id)) {
+                return;
+            }
             selectedTrafficIds.value = [];
+            trafficCandidates.value = [];
             trafficScannedOnce.value = false;
             trafficScanMeta.scanned = null;
-            trafficScanMeta.optimize_tips = null;
+            stopTrafficScanPoll();
+            trafficScanning.value = false;
+            // 换账号后若该账号后台仍在扫 / 已有结果，立刻接上
+            syncTrafficScanState(acc.id);
         }
 
         const selectedAccountTasks = computed(() => {
@@ -3353,7 +3557,12 @@ app.component('weixin-page', {
         async function deleteSelectedTasks() {
             const ids = [...selectedTaskIds.value];
             if (!ids.length) return;
-            if (!confirm(`确定删除已选中的 ${ids.length} 个任务？`)) return;
+            const ok = await appConfirm({
+                title: '批量删除任务',
+                message: `确定删除已选中的 ${ids.length} 个任务？`,
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             try {
                 const res = await props.api.batchDeleteWeixinTasks(ids);
                 selectedTaskIds.value = [];
@@ -3405,7 +3614,12 @@ app.component('weixin-page', {
         }
 
         async function deleteFavoriteLocation(id) {
-            if (!confirm('确定删除该常用位置？')) return;
+            const ok = await appConfirm({
+                title: '删除常用位置',
+                message: '确定删除该常用位置？',
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             try {
                 await props.api.deleteWeixinFavoriteLocation(id);
                 await loadFavoriteLocations();
@@ -3498,7 +3712,12 @@ app.component('weixin-page', {
         }
 
         async function deleteProxyProfile(id) {
-            if (!confirm('确定删除该代理 Profile？')) return;
+            const ok = await appConfirm({
+                title: '删除代理 Profile',
+                message: '确定删除该代理 Profile？',
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             try {
                 await props.api.deleteWeixinProxyProfile(id);
                 await loadProxyProfiles();
@@ -3963,7 +4182,12 @@ app.component('weixin-page', {
         }
 
         async function deleteTask(id) {
-            if (!confirm('确定删除该任务？')) return;
+            const ok = await appConfirm({
+                title: '删除任务',
+                message: '确定删除该任务？',
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             try {
                 await props.api.deleteWeixinTask(id);
                 await loadTasks();
@@ -4001,7 +4225,12 @@ app.component('weixin-page', {
         }
 
         async function deleteSchedule(id) {
-            if (!confirm('确定删除该定时计划？')) return;
+            const ok = await appConfirm({
+                title: '删除定时计划',
+                message: '确定删除该定时计划？',
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             try {
                 await props.api.deleteWeixinSchedule(id);
                 await loadSchedules();
@@ -4012,7 +4241,7 @@ app.component('weixin-page', {
         }
 
         function trafficReasonText(reason) {
-            return { low_views: '低播放', optimize_tip: '优化建议' }[reason] || reason;
+            return { low_views: '低播放' }[reason] || reason;
         }
 
         const isAllTrafficSelected = computed(() => {
@@ -4032,33 +4261,85 @@ app.component('weixin-page', {
                 : [];
         }
 
+        function stopTrafficScanPoll() {
+            if (trafficScanPollTimer) {
+                clearInterval(trafficScanPollTimer);
+                trafficScanPollTimer = null;
+            }
+        }
+
+        function startTrafficScanPoll(accountId) {
+            stopTrafficScanPoll();
+            let ticks = 0;
+            const maxTicks = 900; // 约 30 分钟
+            trafficScanPollTimer = setInterval(async () => {
+                ticks += 1;
+                // 已切到其他账号时不再应用结果，但可继续问状态直到停
+                const stillSelected = selectedAccount.value
+                    && Number(selectedAccount.value.id) === Number(accountId);
+                try {
+                    const res = await props.api.getWeixinTrafficScanStatus(accountId);
+                    if (res.is_scanning) {
+                        if (stillSelected) trafficScanning.value = true;
+                        if (ticks < maxTicks) return;
+                        stopTrafficScanPoll();
+                        if (stillSelected) {
+                            trafficScanning.value = false;
+                            showMessage('扫描耗时较长，请稍后重新进入流量筛选查看结果', 'warning');
+                        }
+                        return;
+                    }
+                    stopTrafficScanPoll();
+                    if (!stillSelected) return;
+                    trafficScanning.value = false;
+                    trafficScannedOnce.value = true;
+                    trafficScanMeta.scanned = res.scanned ?? null;
+                    trafficCandidates.value = res.candidates || [];
+                    selectedTrafficIds.value = [];
+                    if (res.status === 'success') {
+                        showMessage(`扫描完成：候选 ${trafficCandidates.value.length} 条`, 'success');
+                    } else if (res.status === 'idle') {
+                        // 无任务
+                    } else {
+                        showMessage(res.message || '扫描失败', 'error');
+                    }
+                } catch (e) {
+                    if (ticks >= maxTicks) {
+                        stopTrafficScanPoll();
+                        if (stillSelected) {
+                            trafficScanning.value = false;
+                            showMessage('扫描状态查询失败: ' + (e.detail || e.message || e), 'error');
+                        }
+                    }
+                }
+            }, 2000);
+        }
+
         async function scanTrafficCandidates() {
             if (!selectedAccount.value) return;
             if (selectedAccount.value.status !== 'active') {
                 showMessage('请先登录账号后再扫描', 'error');
                 return;
             }
+            const accountId = selectedAccount.value.id;
             trafficScanning.value = true;
             selectedTrafficIds.value = [];
             try {
-                const res = await props.api.scanWeixinTraffic(selectedAccount.value.id, {
+                const res = await props.api.scanWeixinTraffic(accountId, {
                     grace_period_hours: Number(trafficFilter.grace_period_hours) || 0,
                     min_views: Number(trafficFilter.min_views) || 0,
                 });
-                trafficScannedOnce.value = true;
-                if (res.status !== 'success') {
+                if (res.status === 'error') {
+                    trafficScanning.value = false;
                     trafficCandidates.value = [];
                     showMessage(res.message || '扫描失败', 'error');
                     return;
                 }
-                trafficCandidates.value = res.candidates || [];
-                trafficScanMeta.scanned = res.scanned ?? null;
-                trafficScanMeta.optimize_tips = res.optimize_tips ?? null;
-                showMessage(`扫描完成：候选 ${trafficCandidates.value.length} 条`, 'success');
+                showMessage(res.message || '扫描已在后台启动', 'info');
+                startTrafficScanPoll(accountId);
             } catch (e) {
-                showMessage('扫描失败: ' + (e.detail || e.message || e), 'error');
-            } finally {
                 trafficScanning.value = false;
+                showMessage('扫描失败: ' + (e.detail || e.message || e), 'error');
             }
         }
 
@@ -4082,9 +4363,26 @@ app.component('weixin-page', {
             }
         }
 
+        async function deleteOneTrafficPost(item) {
+            if (!item?.post_id) return;
+            const title = item.title || item.post_id;
+            const ok = await appConfirm({
+                title: '删除平台视频',
+                message: `确定删除「${title}」？此操作不可恢复。`,
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
+            await deleteTrafficPosts([item.post_id]);
+        }
+
         async function deleteSelectedTrafficPosts() {
             if (!selectedTrafficIds.value.length) return;
-            if (!confirm(`确定删除选中的 ${selectedTrafficIds.value.length} 条视频？此操作不可恢复。`)) return;
+            const ok = await appConfirm({
+                title: '删除平台视频',
+                message: `确定删除选中的 ${selectedTrafficIds.value.length} 条视频？此操作不可恢复。`,
+                confirmText: '确定删除',
+            });
+            if (!ok) return;
             await deleteTrafficPosts([...selectedTrafficIds.value]);
         }
 
@@ -4127,14 +4425,10 @@ app.component('weixin-page', {
 
         async function triggerRefreshAll() {
             try {
-                const res = await props.api.refreshAllWeixinAccounts();
-                if (res.status === 'running') {
-                    showMessage('刷新已在进行中', 'info');
-                } else {
-                    showMessage('已触发全量账号刷新', 'info');
-                }
+                await props.api.refreshAllWeixinAccounts();
                 refreshAllState.is_refreshing = true;
                 startRefreshPolling();
+                showMessage('正在批量刷新账号状态…', 'info');
             } catch (e) {
                 showMessage('触发刷新失败: ' + (e.detail || e.message || e), 'error');
             }
@@ -4163,14 +4457,17 @@ app.component('weixin-page', {
 
         watch(accountDetailTab, (nextTab) => {
             if (nextTab !== 'manage') hideNativeWeixinBrowser();
+            if (nextTab === 'traffic' && selectedAccount.value) {
+                syncTrafficScanState(selectedAccount.value.id);
+            }
         });
 
         onMounted(async () => {
-            // 启动时先取一次刷新状态：后端 lifespan 已经在跑一次全量刷新，
-            // 这里立刻 poll 进度并在刷新中显示遮罩
+            // 启动时先取一次刷新状态：后端 lifespan 已经在跑一次全量刷新
             await pollRefreshStatus();
             if (refreshAllState.is_refreshing) {
                 startRefreshPolling();
+                showMessage('正在批量刷新账号状态…', 'info');
             }
             loadAccounts();
             loadSchedules();
@@ -4190,6 +4487,7 @@ app.component('weixin-page', {
 
         onBeforeUnmount(() => {
             stopRefreshPolling();
+            stopTrafficScanPoll();
             if (loginPollTimer) {
                 clearInterval(loginPollTimer);
                 loginPollTimer = null;
@@ -4212,7 +4510,7 @@ app.component('weixin-page', {
             trafficFilter, trafficCandidates, selectedTrafficIds, trafficScanning, trafficDeleting,
             trafficScannedOnce, trafficScanMeta, trafficReasonText,
             isAllTrafficSelected, isPartiallyTrafficSelected, toggleSelectAllTraffic,
-            scanTrafficCandidates, deleteTrafficPosts, deleteSelectedTrafficPosts,
+            scanTrafficCandidates, deleteTrafficPosts, deleteOneTrafficPost, deleteSelectedTrafficPosts,
             favoriteLocations, newFavoriteLocation,
             showLocationDropdown, locationComboboxRef, filteredFavoriteLocations, selectFavoriteLocation,
             showProxyDropdown, proxyComboboxRef, selectedProxyDisplay, selectProxyProfile,

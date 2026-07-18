@@ -127,7 +127,15 @@ class DesktopApi:
                 return
             if getattr(self, "_weixin_profile_extract_account_id", None) != account_id:
                 return
+            from src.publishing.weixin.account_manager import get_account_lock
+
+            lock = get_account_lock(account_id)
+            if not lock.acquire(blocking=True, timeout=180):
+                log.warning("后台资料提取跳过：账号锁超时 account=%s", account_id)
+                return
             try:
+                if token != getattr(self, "_weixin_profile_extract_token", 0):
+                    return
                 from app import weixin_account_mgr
                 profile = weixin_account_mgr.extract_and_save_profile(
                     account_id, page=None
@@ -141,6 +149,8 @@ class DesktopApi:
                     log.warning("后台资料提取未拿到昵称/头像: account=%s", account_id)
             except Exception:
                 log.exception("后台资料提取失败: account=%s", account_id)
+            finally:
+                lock.release()
 
         threading.Thread(
             target=_worker,
@@ -450,8 +460,11 @@ class DesktopApi:
         try:
             self._invoke_form(_start_timer)
         except Exception:
-            log.exception("调度 Cookie 重试失败: account=%s", account_id)
-            threading.Timer(max(0.3, delay_ms / 1000.0), _retry).start()
+            # 禁止在后台线程访问 WebView2 CookieManager；下次导航/显示时会再触发同步
+            log.exception(
+                "调度 Cookie 重试失败（已取消后台线程回退）: account=%s",
+                account_id,
+            )
 
     def showWeixinBrowser(self, payload):
         """在主窗口右侧区域叠加一个真正的 WebView2 浏览器控件。"""
@@ -575,6 +588,10 @@ class DesktopApi:
         try:
             account_id = self._weixin_account_id
             cookie_path = self._weixin_cookie_path
+            # 先作废已调度的 Cookie 同步重试，避免关窗标 expired 后重试又写回 active
+            self._weixin_cookie_sync_token = int(
+                getattr(self, "_weixin_cookie_sync_token", 0)
+            ) + 1
 
             def _hide():
                 if self._weixin_control is not None:
@@ -794,6 +811,9 @@ def setup_logging() -> logging.Logger:
 
         def emit(self, record: logging.LogRecord) -> None:
             try:
+                # 自定义 Logger 已直接写入缓冲区；再桥接会导致每条日志出现两次
+                if record.name == "ViralDramaBot.app":
+                    return
                 from src.core.logger import push_log_entry
                 push_log_entry(record.levelname, self.format(record))
             except Exception:

@@ -125,11 +125,19 @@ def _should_continue(body: dict, page_items: int) -> bool:
     return page_items >= PAGE_SIZE
 
 
-def fetch_posts(page: ChromiumPage, max_pages: int = MAX_PAGES) -> list:
+def fetch_posts(
+    page: ChromiumPage,
+    max_pages: int = MAX_PAGES,
+    published_after: Optional[datetime] = None,
+) -> list:
     """
     拉取账号下已发视频列表（含播放量）。
 
     需先导航到 channels 域并完成 Cookie 登录。
+
+    Args:
+        published_after: 若提供，只保留 published_at >= 该时间的作品；
+            且当某一页「最新作品」仍早于该时间时提前停止翻页（列表大致新→旧）。
     """
     page.get(WeixinConfig.POST_LIST_URL)
     time.sleep(1.5)
@@ -162,14 +170,25 @@ def fetch_posts(page: ChromiumPage, max_pages: int = MAX_PAGES) -> list:
             break
 
         items = _extract_list_from_response(body)
+        page_posts = []
         for item in items:
             parsed = parse_post_item(item)
-            if parsed and parsed.post_id not in seen_ids:
-                seen_ids.add(parsed.post_id)
+            if not parsed or parsed.post_id in seen_ids:
+                continue
+            seen_ids.add(parsed.post_id)
+            page_posts.append(parsed)
+            if published_after is None or parsed.published_at >= published_after:
                 posts.append(parsed)
 
         if not items or not _should_continue(body, len(items)):
             break
+
+        # 整页最新一条仍早于窗口 → 后续页只会更旧，停止翻页
+        if published_after is not None and page_posts:
+            newest_on_page = max(p.published_at for p in page_posts)
+            if newest_on_page < published_after:
+                break
+
         time.sleep(0.3)
 
     logger.info(f"已拉取视频列表 {len(posts)} 条")
