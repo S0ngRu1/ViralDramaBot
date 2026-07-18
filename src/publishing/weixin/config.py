@@ -17,6 +17,8 @@ class WeixinConfig:
     # 登录后拉取视频号资料（昵称 / 头像 / uniqId）
     AUTH_DATA_URL = f"{CHANNELS_URL}/cgi-bin/mmfinderassistant-bin/auth/auth_data"
     DEFAULT_ACCOUNT_NAME = "未命名账号"
+    # 批量上传「发表位置」默认值，同时作为常用位置种子数据
+    DEFAULT_FAVORITE_LOCATION = "樱桃沟管委会西胡垌社区综合性文化服务中心"
 
     # 数据目录：唯一使用 %APPDATA%\ViralDramaBot\weixin。
     # WORK_DIR 由 app.py / run_packaged.py 在启动早期固定；即使单独导入本模块，也默认落到 AppData，

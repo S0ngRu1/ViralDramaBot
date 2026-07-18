@@ -50,8 +50,9 @@ class Uploader:
         """
         上传单个视频。
 
-        当前发表流程只会填写「视频描述」+「剧集链接」+「不显示位置」。标签功能已下线，
-        所有标签写入逻辑均不再执行（保留过期的 `tags` 字段会被忽略）。
+        当前发表流程会填写「视频描述」+「剧集链接」+「不显示位置」。
+        若填写了剧集链接，描述框内容为「剧集链接 + 空格 + 原描述」，同时仍挂载剧集链接。
+        标签功能已下线，所有标签写入逻辑均不再执行（保留过期的 `tags` 字段会被忽略）。
 
         位置默认强制为「不显示位置」（位置列表第一项），避免 IP 定位被自动写入。
 
@@ -371,21 +372,32 @@ class Uploader:
     def _fill_metadata(self, page: ChromiumPage, metadata: VideoMetadata, drama_link: Optional[str] = None) -> bool:
         """填写描述 + 剧集链接 + （可选）短标题。
 
-        标签写入已下线：`metadata.tags` 即便有值也不会再拼进描述、也不会再点 #话题 添加。
+        描述框拼接规则：
+        - 有剧集链接 + 有描述 → `{剧集链接} {原描述}`
+        - 只有剧集链接 → 描述框只写剧集链接
+        - 只有描述 → 行为与原来一致（只写原描述）
+
+        剧集挂载逻辑不变：有 drama_link 时仍调用挂载；标签写入已下线。
 
         Returns:
             bool: 当 drama_link 有值时，返回剧集挂载是否成功；无 drama_link 时返回 True。
         """
         logger.info("正在填写视频信息...")
 
+        drama = (drama_link or "").strip()
         description = (metadata.description or "").strip()
+        if drama and description:
+            description = f"{drama} {description}"
+        elif drama:
+            description = drama
+
         if description:
             self._fill_description(page, description)
             self._random_delay(0.5, 1)
 
         drama_link_ok = True
-        if drama_link:
-            drama_link_ok = self._add_drama_link(page, drama_link)
+        if drama:
+            drama_link_ok = self._add_drama_link(page, drama)
             self._random_delay(0.5, 1)
 
         if metadata.title:

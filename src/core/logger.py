@@ -41,6 +41,24 @@ def clear_log_entries() -> int:
     return count
 
 
+def push_log_entry(level: str, message: str) -> None:
+    """供标准 logging / 桌面端桥接写入前端运行日志缓冲区。"""
+    level_name = (level or "INFO").upper()
+    if level_name == "WARNING":
+        level_name = "WARN"
+    if level_name not in ("DEBUG", "INFO", "WARN", "ERROR"):
+        level_name = "INFO"
+    ts = datetime.now().strftime("%H:%M:%S")
+    with _log_lock:
+        _log_seq[0] += 1
+        _log_buffer.append({
+            "id": _log_seq[0],
+            "level": level_name,
+            "msg": str(message),
+            "ts": ts,
+        })
+
+
 class Logger:
     """日志记录器"""
 
@@ -103,6 +121,19 @@ class Logger:
                 message = message % args
             except Exception:
                 pass
+        self._emit(LogLevel.ERROR, message, context)
+
+    def exception(self, message: str, *args, context: Optional[Any] = None) -> None:
+        """记录异常（含 traceback），兼容标准 logging.Logger.exception。"""
+        import traceback
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                pass
+        tb = traceback.format_exc()
+        if tb and tb.strip() != "NoneType: None":
+            message = f"{message}\n{tb}"
         self._emit(LogLevel.ERROR, message, context)
 
     def debug(self, message: str, *args, context: Optional[Any] = None) -> None:
