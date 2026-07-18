@@ -15,8 +15,11 @@ class WeixinConfig:
     POST_LIST_URL = f"{CHANNELS_URL}/platform/post/list"
     LOGIN_URL = f"{CHANNELS_URL}/login.html?from=assistant"
 
-    # 数据目录
-    DATA_DIR = Path(os.getenv("WORK_DIR", Path.home() / ".viraldramabot_data")) / "weixin"
+    # 数据目录：唯一使用 %APPDATA%\ViralDramaBot\weixin。
+    # WORK_DIR 由 app.py / run_packaged.py 在启动早期固定；即使单独导入本模块，也默认落到 AppData，
+    # 不再使用项目 .data 或 ~/.viraldramabot_data，避免账号删除后被旧库“复活”。
+    _APPDATA_ROOT = Path(os.getenv("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+    DATA_DIR = Path(os.getenv("WORK_DIR") or (_APPDATA_ROOT / "ViralDramaBot")) / "weixin"
     COOKIES_DIR = DATA_DIR / "cookies"
     LOGS_DIR = DATA_DIR / "logs"
     DB_PATH = DATA_DIR / "weixin.db"

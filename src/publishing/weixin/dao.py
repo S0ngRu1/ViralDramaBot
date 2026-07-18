@@ -181,6 +181,7 @@ class WeixinDAO:
         if cookie_path:
             Path(cookie_path).unlink(missing_ok=True)
         with self._get_conn() as conn:
+            conn.execute("DELETE FROM schedules WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM upload_tasks WHERE account_id = ?", (account_id,))
             conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
         return True
@@ -502,6 +503,29 @@ class WeixinDAO:
             "skipped_active": skipped_active,
             "not_found": not_found,
         }
+
+    def clear_upload_history(self) -> dict:
+        """删除历史上传记录；跳过仍在执行中的任务，避免打断自动化流程。"""
+        active_statuses = (
+            TaskStatus.UPLOADING.value,
+            TaskStatus.PROCESSING.value,
+            TaskStatus.FILLING.value,
+            TaskStatus.PUBLISHING.value,
+        )
+        with self._get_conn() as conn:
+            placeholders = ",".join("?" for _ in active_statuses)
+            skipped_active = conn.execute(
+                f"SELECT COUNT(*) AS cnt FROM upload_tasks WHERE status IN ({placeholders})",
+                active_statuses,
+            ).fetchone()["cnt"]
+            cursor = conn.execute(
+                f"DELETE FROM upload_tasks WHERE status NOT IN ({placeholders})",
+                active_statuses,
+            )
+            return {
+                "deleted": cursor.rowcount if cursor.rowcount is not None else 0,
+                "skipped_active": skipped_active,
+            }
 
     def has_active_task(self, account_id: int) -> bool:
         """检查指定账号是否有正在执行的上传任务（UPLOADING/PROCESSING/FILLING/PUBLISHING）"""

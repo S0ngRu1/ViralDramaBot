@@ -8,7 +8,7 @@
  * - 完整的短剧处理流程
  */
 
-const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch } = Vue;
+const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } = Vue;
 
 // ============================================================================
 // API 客户端
@@ -19,8 +19,29 @@ const DOWNLOAD_SAVE_PATH_KEY = "viraldramabot.download.savePath";
 const MAX_BATCH_ITEMS = 50;
 
 const getDesktopApi = () => window.pywebview?.api;
+const getErrorMessage = (error) => {
+    if (!error) return '未知错误';
+    if (typeof error === 'string') return error;
+    if (error.detail) return getErrorMessage(error.detail);
+    if (error.message) return getErrorMessage(error.message);
+    if (error.error) return getErrorMessage(error.error);
+    try {
+        return JSON.stringify(error);
+    } catch (_) {
+        return String(error);
+    }
+};
 
 const api = {
+    getDashboard: async () => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/dashboard`);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
     /**
      * 下载视频
      */
@@ -136,12 +157,20 @@ const api = {
         try {
             const desktopApi = getDesktopApi();
             if (desktopApi?.browseFiles) {
-                return await desktopApi.browseFiles();
+                try {
+                    const result = await desktopApi.browseFiles();
+                    if (!result || result.status !== 'error') {
+                        return result;
+                    }
+                    console.warn('Desktop file dialog failed, falling back to backend API:', result);
+                } catch (desktopError) {
+                    console.warn('Desktop file dialog failed, falling back to backend API:', desktopError);
+                }
             }
             const response = await axios.get(`${API_BASE_URL}/browse-files`);
             return response.data;
         } catch (error) {
-            throw error.response?.data || error.message;
+            throw getErrorMessage(error.response?.data || error);
         }
     },
 
@@ -285,6 +314,15 @@ const api = {
         }
     },
 
+    cleanupMaintenance: async (payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/maintenance/cleanup`, payload);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
     // ========================================================================
     // 微信视频号 API
     // ========================================================================
@@ -313,6 +351,42 @@ const api = {
             return response.data;
         } catch (error) {
             throw error.response?.data || error.message;
+        }
+    },
+
+    loginWeixinAccountEmbedded: async (id) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/accounts/${id}/login-embedded`);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
+    getWeixinLoginSession: async (sessionId) => {
+        try {
+            const response = await axios.get(`${API_BASE_URL}/weixin/login-sessions/${sessionId}`);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
+    cancelWeixinLoginSession: async (sessionId) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/login-sessions/${sessionId}/cancel`);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
+        }
+    },
+
+    sendWeixinBrowserInput: async (sessionId, payload) => {
+        try {
+            const response = await axios.post(`${API_BASE_URL}/weixin/login-sessions/${sessionId}/input`, payload);
+            return response.data;
+        } catch (error) {
+            throw getErrorMessage(error.response?.data || error);
         }
     },
 
@@ -463,15 +537,23 @@ const app = createApp({
             <div class="sidebar">
                 <div class="sidebar-logo">
                     <img src="./logo.png" alt="ViralDramaBot" class="logo-img">
-                    <span class="logo-text">ViralDramaBot</span>
+                    <span class="logo-text">视频运营助手</span>
                 </div>
                 <ul class="sidebar-menu">
+                    <li>
+                        <a
+                            :class="{ active: currentPage === 'dashboard' }"
+                            @click="currentPage = 'dashboard'"
+                        >
+                            📊 概览
+                        </a>
+                    </li>
                     <li>
                         <a 
                             :class="{ active: currentPage === 'download' }"
                             @click="currentPage = 'download'"
                         >
-                            📥 视频下载
+                            📥 素材下载
                         </a>
                     </li>
                     <li>
@@ -479,23 +561,23 @@ const app = createApp({
                             :class="{ active: currentPage === 'videos' }"
                             @click="currentPage = 'videos'"
                         >
-                            📺 视频管理
+                            🎬 素材库
                         </a>
                     </li>
                     <li>
                         <a
-                            :class="{ active: currentPage === 'weixin' }"
-                            @click="currentPage = 'weixin'"
+                            :class="{ active: currentPage === 'accounts' }"
+                            @click="currentPage = 'accounts'"
                         >
-                            📤 视频号上传
+                            👤 账号管理
                         </a>
                     </li>
                     <li>
                         <a
-                            :class="{ active: currentPage === 'settings' }"
-                            @click="currentPage = 'settings'"
+                            :class="{ active: currentPage === 'proxies' }"
+                            @click="currentPage = 'proxies'"
                         >
-                            ⚙️ 应用设置
+                            🌐 代理与位置
                         </a>
                     </li>
                     <li>
@@ -506,11 +588,27 @@ const app = createApp({
                             📋 运行日志
                         </a>
                     </li>
+                    <li>
+                        <a
+                            :class="{ active: currentPage === 'settings' }"
+                            @click="currentPage = 'settings'"
+                        >
+                            ⚙️ 设置
+                        </a>
+                    </li>
                 </ul>
             </div>
 
             <!-- 主内容区域 -->
             <div class="main-content">
+                <!-- 运营概览 -->
+                <div v-if="currentPage === 'dashboard'">
+                    <dashboard-page
+                        :api="api"
+                        @navigate="currentPage = $event"
+                    />
+                </div>
+
                 <!-- 下载页面 -->
                 <div v-if="currentPage === 'download'">
                     <download-page 
@@ -538,9 +636,12 @@ const app = createApp({
                     />
                 </div>
 
-                <!-- 微信视频号上传页面 -->
-                <div v-if="currentPage === 'weixin'">
-                    <weixin-page :api="api" />
+                <!-- 视频号运营页面：账号管理 / 代理与位置 -->
+                <div v-if="['accounts', 'proxies'].includes(currentPage)">
+                    <weixin-page
+                        :api="api"
+                        :initial-tab="weixinTabForPage(currentPage)"
+                    />
                 </div>
 
                 <!-- 运行日志页面 -->
@@ -553,7 +654,7 @@ const app = createApp({
 
     setup() {
         const loading = ref(true);
-        const currentPage = ref('download');
+        const currentPage = ref('dashboard');
         const videos = ref([]);
         const settings = ref({
             video_dir: '.data',
@@ -610,6 +711,11 @@ const app = createApp({
             showMessage('✅ 视频下载完成，已刷新视频列表', 'success');
         };
 
+        const weixinTabForPage = (page) => ({
+            accounts: 'accounts',
+            proxies: 'proxies',
+        }[page] || 'accounts');
+
         // 处理保存设置
         const handleSaveSettings = async (newSettings) => {
             try {
@@ -642,7 +748,129 @@ const app = createApp({
             loadSettings,
             showMessage,
             handleDownloadCompleted,
+            weixinTabForPage,
             handleSaveSettings
+        };
+    }
+});
+
+// ============================================================================
+// 运营概览组件
+// ============================================================================
+
+app.component('dashboard-page', {
+    props: ['api'],
+    emits: ['navigate'],
+    template: `
+        <div>
+            <div class="header">
+                <h1>📊 运营工作台</h1>
+                <p>集中查看素材、视频号账号、发布队列和代理状态。</p>
+            </div>
+
+            <div v-if="error" class="alert alert-danger">{{ error }}</div>
+
+            <div class="card" v-if="loading && !dashboard">
+                <span class="spinner"></span> 正在加载概览...
+            </div>
+
+            <div v-if="dashboard">
+                <div class="row">
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">素材库存</div>
+                            <div style="font-size: 32px; font-weight: 700;">{{ dashboard.videos?.total || 0 }}</div>
+                            <p class="text-muted">已下载视频总数</p>
+                            <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'videos')">进入素材库</button>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">视频号账号</div>
+                            <div style="font-size: 32px; font-weight: 700;">{{ dashboard.accounts?.total || 0 }}</div>
+                            <p class="text-muted">可用 {{ statusCount(dashboard.accounts?.by_status, 'active') }} / 登录中 {{ statusCount(dashboard.accounts?.by_status, 'logging_in') }}</p>
+                            <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'accounts')">管理账号</button>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">发布任务</div>
+                            <div style="font-size: 32px; font-weight: 700;">{{ dashboard.tasks?.total || 0 }}</div>
+                            <p class="text-muted">失败 {{ statusCount(dashboard.tasks?.by_status, 'failed') }} / 完成 {{ statusCount(dashboard.tasks?.by_status, 'completed') }}</p>
+                            <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'accounts')">进入账号管理</button>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">代理 Profile</div>
+                            <div style="font-size: 32px; font-weight: 700;">{{ dashboard.proxies?.total || 0 }}</div>
+                            <p class="text-muted">启用 {{ dashboard.proxies?.enabled || 0 }}</p>
+                            <button class="btn btn-secondary btn-small" @click="$emit('navigate', 'proxies')">代理与位置</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row">
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">下载状态</div>
+                            <p><strong>{{ dashboard.download?.status || 'idle' }}</strong> · {{ dashboard.download?.message || '就绪' }}</p>
+                            <div class="progress-bar" style="margin: 12px 0;">
+                                <div class="progress-fill" :style="{ width: (dashboard.download?.percentage || 0) + '%' }"></div>
+                            </div>
+                            <p class="text-muted">{{ dashboard.download?.percentage || 0 }}%</p>
+                            <button class="btn btn-primary btn-small" @click="$emit('navigate', 'download')">素材下载</button>
+                        </div>
+                    </div>
+                    <div class="col">
+                        <div class="card">
+                            <div class="card-title">上传队列</div>
+                            <p>运行中：{{ queueValue('running') ? '是' : '否' }}</p>
+                            <p class="text-muted">等待 {{ queueValue('pending_count') || 0 }} / 活动 {{ queueValue('active_count') || 0 }}</p>
+                            <button class="btn btn-primary btn-small" @click="$emit('navigate', 'accounts')">进入账号管理</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    `,
+    setup(props) {
+        const dashboard = ref(null);
+        const loading = ref(false);
+        const error = ref('');
+        let timer = null;
+
+        const loadDashboard = async () => {
+            loading.value = true;
+            error.value = '';
+            try {
+                dashboard.value = await props.api.getDashboard();
+            } catch (err) {
+                error.value = getErrorMessage(err);
+            } finally {
+                loading.value = false;
+            }
+        };
+
+        const statusCount = (stats, key) => Number(stats?.[key] || 0);
+        const queueValue = (key) => dashboard.value?.queue?.[key];
+
+        onMounted(() => {
+            loadDashboard();
+            timer = setInterval(loadDashboard, 10000);
+        });
+        onBeforeUnmount(() => {
+            if (timer) clearInterval(timer);
+        });
+
+        return {
+            dashboard,
+            loading,
+            error,
+            loadDashboard,
+            statusCount,
+            queueValue
         };
     }
 });
@@ -1486,6 +1714,48 @@ app.component('settings-page', {
                 </div>
             </div>
 
+            <!-- 维护清理 -->
+            <div class="card">
+                <div class="card-title">🧹 维护清理</div>
+                <p class="text-muted" style="font-size: 13px; margin-bottom: 12px;">
+                    清理不会删除账号、账号 Cookie 或本地视频文件；上传中的任务会自动保留。
+                </p>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" v-model="cleanupForm.logs" />
+                        清除日志
+                    </label>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                        清空实时日志视图和打包版 app.log。
+                    </p>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" v-model="cleanupForm.cache" />
+                        清除缓存
+                    </label>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                        清理代理检测缓存、临时浏览器 Profile、素材索引缓存；不删除下载的视频文件。
+                    </p>
+                </div>
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" v-model="cleanupForm.upload_history" />
+                        清除历史视频上传记录
+                    </label>
+                    <p class="text-muted" style="font-size: 12px; margin-top: 4px;">
+                        删除发布情况里的历史任务记录，正在上传/发布中的任务会跳过。
+                    </p>
+                </div>
+                <button class="btn btn-danger" @click="runCleanup" :disabled="isCleaning">
+                    <span v-if="isCleaning"><span class="spinner"></span> 清理中...</span>
+                    <span v-else>执行清理</span>
+                </button>
+                <p v-if="cleanupResult" class="text-muted" style="font-size: 12px; margin-top: 10px; white-space: pre-line;">
+                    {{ cleanupResult }}
+                </p>
+            </div>
+
             <!-- 系统信息 -->
             <div class="card">
                 <div class="card-title">系统信息</div>
@@ -1530,6 +1800,13 @@ app.component('settings-page', {
         const isTestingProxy = ref(false);
         const proxyTestResult = ref('');
         const proxyTestOk = ref(false);
+        const cleanupForm = reactive({
+            logs: true,
+            cache: true,
+            upload_history: true
+        });
+        const isCleaning = ref(false);
+        const cleanupResult = ref('');
 
         const browseVideoDir = async () => {
             if (isBrowsing.value) return;
@@ -1592,15 +1869,54 @@ app.component('settings-page', {
             }
         };
 
+        const runCleanup = async () => {
+            if (isCleaning.value) return;
+            if (!cleanupForm.logs && !cleanupForm.cache && !cleanupForm.upload_history) {
+                alert('请至少选择一个清理项');
+                return;
+            }
+            const items = [];
+            if (cleanupForm.logs) items.push('日志');
+            if (cleanupForm.cache) items.push('缓存');
+            if (cleanupForm.upload_history) items.push('历史视频上传记录');
+            if (!confirm(`确定清理：${items.join('、')}？\n\n不会删除账号、Cookie 或本地视频文件。`)) return;
+
+            isCleaning.value = true;
+            cleanupResult.value = '';
+            try {
+                const res = await props.api.cleanupMaintenance({ ...cleanupForm });
+                const result = res.result || {};
+                const lines = ['清理完成'];
+                if (result.logs) {
+                    lines.push(`日志：清除内存记录 ${result.logs.memory_entries || 0} 条，日志文件 ${result.logs.files?.length || 0} 个`);
+                }
+                if (result.cache) {
+                    lines.push(`缓存：清理目录 ${result.cache.removed_paths?.length || 0} 个，素材索引 ${result.cache.video_index_rows || 0} 条`);
+                }
+                if (result.upload_history) {
+                    lines.push(`历史上传记录：删除 ${result.upload_history.deleted || 0} 条，跳过活动任务 ${result.upload_history.skipped_active || 0} 条`);
+                }
+                cleanupResult.value = lines.join('\n');
+            } catch (error) {
+                cleanupResult.value = '清理失败：' + getErrorMessage(error);
+            } finally {
+                isCleaning.value = false;
+            }
+        };
+
         return {
             formData,
             isBrowsing,
             isTestingProxy,
             proxyTestResult,
             proxyTestOk,
+            cleanupForm,
+            isCleaning,
+            cleanupResult,
             browseVideoDir,
             save,
-            testProxy
+            testProxy,
+            runCleanup
         };
     }
 });
@@ -1610,12 +1926,15 @@ app.component('settings-page', {
 // ============================================================================
 
 app.component('weixin-page', {
-    props: ['api'],
+    props: ['api', 'initialTab'],
     template: `
-        <div>
-            <div class="header">
-                <h1>📤 视频号上传管理</h1>
-                <p>管理视频号账号、批量上传视频、配置发布位置</p>
+        <div :class="['weixin-shell', { 'account-mode': tab === 'accounts' }]">
+            <div class="header weixin-header">
+                <div>
+                    <div class="header-eyebrow">CHANNELS WORKSPACE</div>
+                    <h1>{{ tab === 'accounts' ? '视频号账号管理' : (tab === 'proxies' ? '代理与位置' : '视频号发布中心') }}</h1>
+                    <p>{{ tab === 'accounts' ? '集中管理账号、内容发布与发布记录' : (tab === 'proxies' ? '管理发布代理与常用位置' : '创建并跟踪视频号发布任务') }}</p>
+                </div>
             </div>
 
             <!-- 消息提示 -->
@@ -1623,18 +1942,38 @@ app.component('weixin-page', {
                 {{ message.text }}
             </div>
 
+            <div v-if="false && loginModal.show" class="modal-overlay" @click.self="cancelEmbeddedLogin">
+                <div class="modal-box">
+                    <div class="modal-header">
+                        <h3>应用内扫码登录</h3>
+                        <button class="modal-close" @click="cancelEmbeddedLogin">×</button>
+                    </div>
+                    <div style="text-align: center;">
+                        <p class="text-muted" style="margin-bottom: 12px;">{{ loginModal.message || '正在加载二维码...' }}</p>
+                        <div v-if="loginModal.qr" style="display: inline-block; padding: 14px; background: #fff; border-radius: 12px; border: 1px solid #ddd;">
+                            <img :src="'data:image/png;base64,' + loginModal.qr" style="width: 240px; max-width: 100%; display: block;" />
+                        </div>
+                        <div v-else class="card" style="margin: 0 auto; max-width: 280px;">
+                            <span class="spinner"></span> 正在获取二维码...
+                        </div>
+                        <p class="text-muted" style="font-size: 12px; margin-top: 12px;">
+                            不会弹出外部视频号登录页面；请用微信扫描上方二维码。
+                        </p>
+                        <div class="action-group" style="justify-content: center; margin-top: 16px;">
+                            <button class="btn btn-secondary" @click="cancelEmbeddedLogin">取消</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- 标签页 -->
-            <div class="tabs">
+            <div v-if="tab !== 'accounts'" class="tabs">
                 <div :class="['tab', { active: tab === 'accounts' }]" @click="tab = 'accounts'">账号管理</div>
-                <div :class="['tab', { active: tab === 'batch' }]" @click="tab = 'batch'">批量上传</div>
-                <div :class="['tab', { active: tab === 'tasks' }]" @click="tab = 'tasks'; loadTasks()">任务列表</div>
-                <div :class="['tab', { active: tab === 'proxies' }]" @click="tab = 'proxies'; loadProxyProfiles(); loadFavoriteLocations()">发布位置管理</div>
-                <!-- 定时发布暂不对外暴露，保留后端代码以便后续恢复 -->
-                <div v-if="false" :class="['tab', { active: tab === 'schedule' }]" @click="tab = 'schedule'; loadSchedules()">定时发布</div>
+                <div :class="['tab', { active: tab === 'proxies' }]" @click="tab = 'proxies'; loadProxyProfiles(); loadFavoriteLocations()">代理与位置</div>
             </div>
 
             <!-- 账号管理 -->
-            <div v-if="tab === 'accounts'">
+            <div v-if="tab === 'accounts'" class="account-workspace">
                 <div
                     v-if="refreshAllState.is_refreshing"
                     class="card"
@@ -1645,27 +1984,55 @@ app.component('weixin-page', {
                         <span class="spinner"></span>
                     </div>
                 </div>
-                <div class="card">
-                    <div class="flex-between" style="margin-bottom: 16px;">
-                        <div class="card-title" style="margin-bottom: 0;">视频号账号</div>
-                        <div class="action-group">
+                <aside class="account-list-panel">
+                    <div class="account-list-header">
+                        <div>
+                            <div class="account-list-kicker">账号中心</div>
+                            <div class="account-list-title">视频号账号</div>
+                        </div>
+                        <div class="account-list-actions">
                             <button
-                                class="btn btn-secondary btn-small"
+                                class="icon-button"
                                 @click="triggerRefreshAll"
                                 :disabled="refreshAllState.is_refreshing"
-                                title="重新检测所有账号 Cookie 是否仍有效"
+                                title="刷新账号状态"
                             >
-                                <span v-if="refreshAllState.is_refreshing"><span class="spinner"></span> 刷新中</span>
-                                <span v-else>🔄 全量刷新</span>
+                                <span v-if="refreshAllState.is_refreshing" class="spinner"></span>
+                                <span v-else>↻</span>
                             </button>
                             <button
-                                class="btn btn-primary btn-small"
+                                class="account-add-button"
                                 @click="showAddAccount = true"
                                 :disabled="refreshAllState.is_refreshing"
-                            >+ 添加账号</button>
+                            >＋ 添加</button>
                         </div>
                     </div>
-                    <table class="table" v-if="accounts.length">
+                    <div v-if="showAddAccount" class="inline-create-account">
+                        <div class="form-group">
+                            <label>账号名称</label>
+                            <input v-model="newAccountName" type="text" placeholder="给账号起个名字，如：我的视频号">
+                        </div>
+                        <div class="action-group">
+                            <button class="btn btn-secondary btn-small" @click="showAddAccount = false; newAccountName = ''">取消</button>
+                            <button class="btn btn-primary btn-small" @click="addAccount" :disabled="!newAccountName">创建并登录</button>
+                        </div>
+                    </div>
+                    <div class="account-list" v-if="accounts.length">
+                        <button
+                            v-for="acc in accounts"
+                            :key="acc.id"
+                            :class="['account-list-item', { active: selectedAccount && selectedAccount.id === acc.id }]"
+                            @click="selectAccount(acc)"
+                        >
+                            <span class="account-avatar">{{ acc.name.slice(0, 1).toUpperCase() }}</span>
+                            <span class="account-list-copy">
+                                <span class="account-list-name">{{ acc.name }}</span>
+                                <span class="account-list-meta">{{ acc.status === 'active' ? '已连接' : getStatusText(acc.status) }}</span>
+                            </span>
+                            <span :class="['account-status-dot', getStatusClass(acc.status)]"></span>
+                        </button>
+                    </div>
+                    <table class="table legacy-account-table" v-if="accounts.length">
                         <thead>
                             <tr>
                                 <th>ID</th>
@@ -1677,7 +2044,13 @@ app.component('weixin-page', {
                             </tr>
                         </thead>
                         <tbody>
-                            <tr v-for="acc in accounts" :key="acc.id">
+                            <tr
+                                v-for="acc in accounts"
+                                :key="acc.id"
+                                :class="{ selected: selectedAccount && selectedAccount.id === acc.id }"
+                                @click="selectAccount(acc)"
+                                style="cursor: pointer;"
+                            >
                                 <td>{{ acc.id }}</td>
                                 <td>{{ acc.name }}</td>
                                 <td><span :class="'badge badge-' + getStatusClass(acc.status)">{{ getStatusText(acc.status) }}</span></td>
@@ -1688,24 +2061,228 @@ app.component('weixin-page', {
                                 <td>{{ formatDate(acc.created_at) }}</td>
                                 <td>
                                     <div class="action-group">
-                                        <button class="btn btn-primary btn-small" @click="loginAccount(acc.id)" :disabled="acc.status === 'logging_in' || refreshAllState.is_refreshing">
+                                        <button class="btn btn-primary btn-small" @click.stop="loginAccount(acc.id)" :disabled="acc.status === 'logging_in' || refreshAllState.is_refreshing">
                                             {{ acc.status === 'logging_in' ? '扫码中...' : '扫码登录' }}
                                         </button>
-                                        <button class="btn btn-secondary btn-small" @click="refreshAccount(acc.id)" :disabled="refreshingIds.has(acc.id) || refreshAllState.is_refreshing">
+                                        <button class="btn btn-secondary btn-small" @click.stop="refreshAccount(acc.id)" :disabled="refreshingIds.has(acc.id) || refreshAllState.is_refreshing">
                                             <span v-if="refreshingIds.has(acc.id)"><span class="spinner"></span> 刷新中</span>
                                             <span v-else>刷新</span>
                                         </button>
-                                        <button class="btn btn-secondary btn-small" @click="openWeixinPostList(acc.id)" :disabled="refreshAllState.is_refreshing">
+                                        <button v-if="false" class="btn btn-secondary btn-small" @click.stop="openWeixinPostList(acc.id)" :disabled="refreshAllState.is_refreshing">
                                             视频管理页
                                         </button>
-                                        <button class="btn btn-danger btn-small" @click="deleteAccount(acc.id)" :disabled="refreshAllState.is_refreshing">删除</button>
+                                        <button class="btn btn-danger btn-small" @click.stop="deleteAccount(acc.id)" :disabled="refreshAllState.is_refreshing">删除</button>
                                     </div>
                                 </td>
                             </tr>
                         </tbody>
                     </table>
-                    <div v-else class="empty-state">暂无账号，点击"添加账号"开始</div>
-                </div>
+                    <div v-else class="account-list-empty">
+                        <span>暂无账号</span>
+                        <button class="text-button" @click="showAddAccount = true">添加第一个账号</button>
+                    </div>
+                    <div class="account-list-footer">{{ accounts.length }} 个账号</div>
+                </aside>
+
+                <main v-if="selectedAccount" class="account-main-panel">
+                    <div class="account-main-header">
+                        <div class="account-heading">
+                            <span class="account-heading-avatar">{{ selectedAccount.name.slice(0, 1).toUpperCase() }}</span>
+                            <div>
+                                <div class="account-heading-name">{{ selectedAccount.name }}</div>
+                                <div class="account-heading-status">
+                                    <span :class="['account-status-dot', getStatusClass(selectedAccount.status)]"></span>
+                                    {{ getStatusText(selectedAccount.status) }}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="account-tabs">
+                        <button :class="['account-tab', { active: accountDetailTab === 'upload' }]" @click="accountDetailTab = 'upload'">视频上传</button>
+                        <button :class="['account-tab', { active: accountDetailTab === 'manage' }]" @click="openAccountManagement">视频号管理</button>
+                        <button :class="['account-tab', { active: accountDetailTab === 'status' }]" @click="accountDetailTab = 'status'; loadTasks()">发布记录</button>
+                    </div>
+
+                    <div v-if="false && accountDetailTab === 'upload'">
+                        <p class="text-muted" style="margin-bottom: 12px;">为该账号创建视频发布任务。</p>
+                        <button class="btn btn-primary" @click="goAccountUpload(selectedAccount)">进入该账号上传</button>
+                    </div>
+
+                    <div v-if="accountDetailTab === 'upload'" class="account-tab-pane content-pane">
+                        <div class="pane-heading">
+                            <h2>发布视频</h2>
+                            <p>选择视频素材并完善发布信息</p>
+                        </div>
+                        <div class="form-group">
+                            <label>视频文件列表</label>
+                            <table class="table" style="margin-bottom: 10px;" v-if="batchForm.videoFiles.length">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 85%;">文件路径</th>
+                                        <th style="width: 15%;">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(file, idx) in batchForm.videoFiles" :key="idx">
+                                        <td class="truncate" :title="file">{{ file }}</td>
+                                        <td><button class="btn btn-danger btn-small" @click="removeBatchFile(idx)">删除</button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <button class="btn btn-secondary" @click="browseBatchFiles" :disabled="isBrowsingBatchFiles">
+                                <span v-if="!isBrowsingBatchFiles">选择文件（可多选）</span>
+                                <span v-else>选择中...</span>
+                            </button>
+                            <p class="text-muted" style="font-size: 12px; margin-top: 5px;">已选 {{ batchForm.videoFiles.length }} 个文件</p>
+                        </div>
+                        <div class="form-group">
+                            <label>视频描述（所有视频共用）</label>
+                            <textarea v-model="batchForm.descriptionStr" placeholder="所有视频都会使用该描述" rows="3"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label>剧集链接（可选）</label>
+                            <input v-model="batchForm.drama_link" type="text" placeholder="输入视频号剧集名称或链接">
+                        </div>
+                        <div class="row">
+                            <div class="col">
+                                <div class="form-group">
+                                    <label>上传代理</label>
+                                    <select v-model="batchForm.proxy_profile_id">
+                                        <option value="">不指定代理 Profile</option>
+                                        <option v-for="p in enabledProxyProfiles" :key="p.id" :value="p.id">{{ proxyProfileOptionLabel(p) }}</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col">
+                                <div class="form-group">
+                                    <label>发表位置</label>
+                                    <input v-model.trim="batchForm.location_label" type="text" placeholder="留空则按不显示位置发布">
+                                </div>
+                            </div>
+                        </div>
+                        <button class="btn btn-success btn-block" @click="createBatchUpload" :disabled="!selectedAccount || batchForm.videoFiles.length === 0">
+                            为 {{ selectedAccount.name }} 创建上传任务
+                        </button>
+                    </div>
+
+                    <div v-if="accountDetailTab === 'manage'" class="account-tab-pane manage-pane">
+                        <div class="pane-toolbar">
+                            <div>
+                                <h2>视频号管理</h2>
+                                <p>登录后可管理当前账号的视频号内容</p>
+                            </div>
+                            <div class="action-group">
+                            <button
+                                v-if="selectedAccount.status !== 'active'"
+                                class="btn btn-primary"
+                                @click="startNativeWeixinBrowser(true)"
+                                :disabled="refreshAllState.is_refreshing"
+                            >登录视频号</button>
+                            <button
+                                v-else
+                                class="btn btn-primary"
+                                @click="reloadNativeWeixinBrowser"
+                                :disabled="refreshAllState.is_refreshing"
+                            >重新加载页面</button>
+                            <button class="btn btn-secondary" @click="refreshAccount(selectedAccount.id)" :disabled="refreshingIds.has(selectedAccount.id) || refreshAllState.is_refreshing">刷新状态</button>
+                            <button class="btn btn-danger" @click="deleteAccount(selectedAccount.id)" :disabled="refreshAllState.is_refreshing">删除账号</button>
+                            </div>
+                        </div>
+                        <div v-if="selectedAccount.status !== 'active' && !nativeBrowserVisible" class="account-expired-state">
+                            <div class="account-expired-icon">!</div>
+                            <h3>账号登录已过期</h3>
+                            <p>请重新登录后继续管理视频号内容</p>
+                            <button class="btn btn-primary" @click="startNativeWeixinBrowser(true)">登录视频号</button>
+                        </div>
+                        <div v-else class="native-browser-shell">
+                            <div class="browser-frame-header">
+                                <div class="browser-controls"><span></span><span></span><span></span></div>
+                                <div class="browser-address">{{ selectedAccount.status === 'active' ? 'https://channels.weixin.qq.com/platform' : 'https://channels.weixin.qq.com/login.html' }}</div>
+                                <div class="native-browser-actions">
+                                    <button class="text-button" @click="backNativeWeixinBrowser">后退</button>
+                                    <button class="text-button" @click="reloadNativeWeixinBrowser">刷新</button>
+                                </div>
+                            </div>
+                            <div ref="browserHostRef" class="native-browser-host">
+                                <div v-if="!hasNativeBrowser" class="native-browser-placeholder">
+                                    <span class="spinner"></span>
+                                    <p>正在加载视频号管理页面...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-if="accountDetailTab === 'status'" class="account-tab-pane content-pane">
+                        <div class="pane-toolbar">
+                            <div>
+                                <h2>发布记录</h2>
+                                <p>查看 {{ selectedAccount.name }} 的视频发布进度与结果</p>
+                            </div>
+                            <div class="action-group">
+                                <span v-if="selectedTaskIds.length" class="text-muted">已选 {{ selectedTaskIds.length }} 项</span>
+                                <button class="btn btn-danger btn-small" :disabled="!selectedTaskIds.length" @click="deleteSelectedTasks">删除选中</button>
+                                <button class="btn btn-secondary btn-small" @click="loadTasks">刷新</button>
+                            </div>
+                        </div>
+                        <div v-if="selectedAccountTasks.length" class="account-task-table-wrap">
+                        <table class="table account-task-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 36px;">
+                                        <input
+                                            type="checkbox"
+                                            :checked="isAllSelectableSelected"
+                                            :indeterminate.prop="isPartiallySelected"
+                                            :disabled="!selectableTaskIds.length"
+                                            @change="toggleSelectAllTasks($event.target.checked)"
+                                        />
+                                    </th>
+                                    <th>视频</th>
+                                    <th>描述</th>
+                                    <th>位置</th>
+                                    <th>状态</th>
+                                    <th>创建时间</th>
+                                    <th>错误</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="task in selectedAccountTasks" :key="task.id">
+                                    <td>
+                                        <input
+                                            type="checkbox"
+                                            :value="task.id"
+                                            v-model="selectedTaskIds"
+                                            :disabled="isTaskActive(task.status)"
+                                        />
+                                    </td>
+                                    <td :title="task.video_path">{{ getFileName(task.video_path) }}</td>
+                                    <td>{{ task.description || task.title || task.video_path }}</td>
+                                    <td>{{ task.location_label || '-' }}</td>
+                                    <td><span :class="'badge badge-' + getTaskStatusClass(task.status)">{{ getTaskStatusText(task.status) }}</span></td>
+                                    <td>{{ formatDate(task.created_at) }}</td>
+                                    <td>{{ task.error_msg || '-' }}</td>
+                                    <td>
+                                        <div class="action-group">
+                                            <button v-if="task.status === 'failed'" class="btn btn-primary btn-small" @click="retryTask(task.id)">重试</button>
+                                            <button class="btn btn-danger btn-small" :disabled="isTaskActive(task.status)" @click="deleteTask(task.id)">删除</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        </div>
+                        <div v-else class="empty-state">该账号暂无发布记录</div>
+                    </div>
+                </main>
+
+                <main v-else class="account-main-panel account-empty-panel">
+                    <div class="account-empty-content">
+                        <div class="account-empty-icon">◎</div>
+                        <h2>选择一个视频号账号</h2>
+                        <p>从左侧账号列表选择账号后开始管理</p>
+                    </div>
+                </main>
             </div>
 
             <!-- 批量上传 -->
@@ -1846,7 +2423,7 @@ app.component('weixin-page', {
                                     </div>
                                 </div>
                                 <p v-if="!favoriteLocations.length" class="text-muted" style="font-size: 12px; margin-top: 4px;">
-                                    可在「发布位置管理」页设置常用位置，之后这里会出现下拉候选
+                                    可在「代理与位置」页设置常用位置，之后这里会出现下拉候选
                                 </p>
                             </div>
                         </div>
@@ -1934,7 +2511,7 @@ app.component('weixin-page', {
             <div v-if="tab === 'proxies'">
                 <div class="card">
                     <div class="flex-between" style="margin-bottom: 16px;">
-                        <div class="card-title" style="margin-bottom: 0;">发布位置管理</div>
+                        <div class="card-title" style="margin-bottom: 0;">代理与位置</div>
                         <div class="action-group">
                             <button class="btn btn-secondary btn-small" @click="checkAllProxyProfiles" :disabled="checkingAllProxies">批量检测</button>
                             <button class="btn btn-primary btn-small" @click="openProxyModal()">+ 添加代理</button>
@@ -2093,7 +2670,7 @@ app.component('weixin-page', {
             </div>
 
             <!-- 添加账号弹窗 -->
-            <div v-if="showAddAccount" class="modal-overlay" @click.self="showAddAccount = false">
+            <div v-if="false && showAddAccount" class="modal-overlay" @click.self="showAddAccount = false">
                 <div class="modal-box">
                     <h3>添加视频号账号</h3>
                     <div class="form-group">
@@ -2160,10 +2737,12 @@ app.component('weixin-page', {
         // 这些状态的任务不允许批量删除，否则会让仍在跑的浏览器自动化任务变成孤儿任务。
         const ACTIVE_TASK_STATUSES = ['uploading', 'processing', 'filling', 'publishing'];
 
-        const tab = ref('accounts');
+        const tab = ref(props.initialTab || 'accounts');
         const accounts = ref([]);
         const tasks = ref([]);
         const selectedTaskIds = ref([]);
+        const selectedAccount = ref(null);
+        const accountDetailTab = ref('upload');
         const schedules = ref([]);
         const proxyProfiles = ref([]);
         const favoriteLocations = ref([]);
@@ -2181,6 +2760,24 @@ app.component('weixin-page', {
         const refreshingIds = ref(new Set());
         const isBrowsingBatchFiles = ref(false);
         const checkingAllProxies = ref(false);
+        const browserCanvasRef = ref(null);
+        const browserHostRef = ref(null);
+        const nativeBrowserVisible = ref(false);
+        const hasNativeBrowser = computed(() => Boolean(getDesktopApi()?.showWeixinBrowser));
+        const loginModal = reactive({
+            show: false,
+            sessionId: '',
+            accountId: null,
+            status: '',
+            message: '',
+            qr: '',
+            url: ''
+        });
+        let loginPollTimer = null;
+        let browserWheelTimer = null;
+        let browserActiveNotified = false;
+        let nativeBrowserResizeObserver = null;
+        let nativeStatusTimer = null;
         const message = reactive({ show: false, type: 'info', text: '' });
         const proxyForm = reactive({
             id: null,
@@ -2247,6 +2844,24 @@ app.component('weixin-page', {
             return a ? a.name : '#' + id;
         }
 
+        function selectAccount(acc) {
+            hideNativeWeixinBrowser();
+            selectedAccount.value = acc;
+            accountDetailTab.value = 'upload';
+            batchForm.account_id = acc.id;
+        }
+
+        const selectedAccountTasks = computed(() => {
+            if (!selectedAccount.value) return [];
+            return tasks.value.filter(t => Number(t.account_id) === Number(selectedAccount.value.id));
+        });
+
+        function goAccountUpload(acc) {
+            batchForm.account_id = acc.id;
+            accountDetailTab.value = 'upload';
+            showMessage(`已选择账号：${acc.name}`, 'success');
+        }
+
         const enabledProxyProfiles = computed(() => proxyProfiles.value.filter(p => p.enabled));
 
         function proxyProfileOptionLabel(p) {
@@ -2304,7 +2919,7 @@ app.component('weixin-page', {
         }
 
         const selectableTaskIds = computed(() =>
-            tasks.value.filter(t => !isTaskActive(t.status)).map(t => t.id)
+            selectedAccountTasks.value.filter(t => !isTaskActive(t.status)).map(t => t.id)
         );
         const isAllSelectableSelected = computed(() =>
             selectableTaskIds.value.length > 0 &&
@@ -2501,10 +3116,16 @@ app.component('weixin-page', {
 
         async function addAccount() {
             try {
-                await props.api.createWeixinAccount(newAccountName.value);
+                const created = await props.api.createWeixinAccount(newAccountName.value);
                 showAddAccount.value = false;
                 newAccountName.value = '';
                 await loadAccounts();
+                const account = created.account || accounts.value[0];
+                if (account) {
+                    selectAccount(account);
+                    accountDetailTab.value = 'manage';
+                    await loginAccount(account.id);
+                }
                 showMessage('账号已创建，请点击"扫码登录"', 'success');
             } catch (e) {
                 showMessage('创建失败: ' + (e.message || e), 'error');
@@ -2513,20 +3134,206 @@ app.component('weixin-page', {
 
         async function loginAccount(id) {
             try {
-                await props.api.loginWeixinAccount(id);
-                showMessage('扫码登录已启动，请在弹出的浏览器窗口中扫码', 'info');
-                const timer = setInterval(async () => {
-                    await loadAccounts();
-                    const acc = accounts.value.find(a => a.id === id);
-                    if (acc && acc.status !== 'logging_in') {
-                        clearInterval(timer);
-                        if (acc.status === 'active') showMessage('登录成功！', 'success');
-                        else showMessage('登录未完成：' + getStatusText(acc.status), 'info');
-                    }
-                }, 2000);
+                const res = await props.api.loginWeixinAccountEmbedded(id);
+                loginModal.show = true;
+                loginModal.sessionId = res.session_id;
+                loginModal.accountId = id;
+                loginModal.status = 'starting';
+                loginModal.message = res.message || '正在加载视频号页面';
+                loginModal.qr = '';
+                loginModal.url = '';
+                browserActiveNotified = false;
+                accountDetailTab.value = 'manage';
+                if (loginPollTimer) clearInterval(loginPollTimer);
+                await pollEmbeddedLogin();
+                loginPollTimer = setInterval(pollEmbeddedLogin, 1000);
             } catch (e) {
-                showMessage('登录失败: ' + (e.message || e), 'error');
+                showMessage('登录失败: ' + getErrorMessage(e), 'error');
             }
+        }
+
+        async function openAccountManagement() {
+            accountDetailTab.value = 'manage';
+            if (!selectedAccount.value) return;
+            if (selectedAccount.value.status === 'active') {
+                await startNativeWeixinBrowser(false);
+            }
+        }
+
+        function nativeBrowserBounds() {
+            const host = browserHostRef.value;
+            if (!host) return null;
+            const rect = host.getBoundingClientRect();
+            return {
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height
+            };
+        }
+
+        async function syncNativeBrowserBounds() {
+            const desktop = getDesktopApi();
+            const bounds = nativeBrowserBounds();
+            if (!desktop?.updateWeixinBrowserBounds || !bounds || !nativeBrowserVisible.value) return;
+            await desktop.updateWeixinBrowserBounds(bounds);
+        }
+
+        async function startNativeWeixinBrowser(forceLogin = false) {
+            if (!selectedAccount.value) return;
+            nativeBrowserVisible.value = true;
+            await nextTick();
+            const desktop = getDesktopApi();
+            if (!desktop?.showWeixinBrowser) return;
+            const result = await desktop.showWeixinBrowser({
+                account_id: selectedAccount.value.id,
+                status: forceLogin ? 'expired' : selectedAccount.value.status,
+                cookie_path: selectedAccount.value.cookie_path,
+                bounds: nativeBrowserBounds()
+            });
+            if (result?.status === 'error') {
+                nativeBrowserVisible.value = false;
+                showMessage('视频号页面加载失败：' + getErrorMessage(result), 'error');
+                return;
+            }
+            if (!nativeBrowserResizeObserver && browserHostRef.value) {
+                nativeBrowserResizeObserver = new ResizeObserver(syncNativeBrowserBounds);
+                nativeBrowserResizeObserver.observe(browserHostRef.value);
+            }
+            if (!nativeStatusTimer) {
+                nativeStatusTimer = setInterval(async () => {
+                    await loadAccounts();
+                    if (selectedAccount.value) {
+                        selectedAccount.value = accounts.value.find(a => a.id === selectedAccount.value.id) || selectedAccount.value;
+                    }
+                }, 3000);
+            }
+        }
+
+        async function hideNativeWeixinBrowser() {
+            nativeBrowserVisible.value = false;
+            const desktop = getDesktopApi();
+            if (desktop?.hideWeixinBrowser) await desktop.hideWeixinBrowser();
+        }
+
+        async function reloadNativeWeixinBrowser() {
+            const desktop = getDesktopApi();
+            if (!nativeBrowserVisible.value) {
+                await startNativeWeixinBrowser(selectedAccount.value?.status !== 'active');
+            } else if (desktop?.reloadWeixinBrowser) {
+                await desktop.reloadWeixinBrowser();
+            }
+        }
+
+        async function backNativeWeixinBrowser() {
+            const desktop = getDesktopApi();
+            if (desktop?.backWeixinBrowser) await desktop.backWeixinBrowser();
+        }
+
+        async function restartAccountBrowser() {
+            if (!selectedAccount.value) return;
+            if (loginModal.sessionId) {
+                await cancelEmbeddedLogin(false);
+            }
+            await loginAccount(selectedAccount.value.id);
+        }
+
+        async function pollEmbeddedLogin() {
+            if (!loginModal.sessionId) return;
+            try {
+                const res = await props.api.getWeixinLoginSession(loginModal.sessionId);
+                const session = res.session || {};
+                loginModal.status = session.status || '';
+                loginModal.message = session.message || '';
+                loginModal.qr = session.qr || loginModal.qr;
+                loginModal.url = session.url || loginModal.url;
+                if (loginModal.status === 'active' && !browserActiveNotified) {
+                    browserActiveNotified = true;
+                    await loadAccounts();
+                    if (selectedAccount.value) {
+                        selectedAccount.value = accounts.value.find(a => a.id === selectedAccount.value.id) || selectedAccount.value;
+                    }
+                    showMessage('视频号后台已加载', 'success');
+                }
+                if (['failed', 'error', 'timeout', 'cancelled'].includes(loginModal.status)) {
+                    if (loginPollTimer) {
+                        clearInterval(loginPollTimer);
+                        loginPollTimer = null;
+                    }
+                    await loadAccounts();
+                    if (selectedAccount.value) {
+                        selectedAccount.value = accounts.value.find(a => a.id === selectedAccount.value.id) || selectedAccount.value;
+                    }
+                    showMessage('页面已停止：' + (loginModal.message || loginModal.status), 'info');
+                }
+            } catch (e) {
+                if (loginPollTimer) clearInterval(loginPollTimer);
+                loginPollTimer = null;
+                showMessage('登录状态获取失败: ' + getErrorMessage(e), 'error');
+            }
+        }
+
+        async function cancelEmbeddedLogin(reloadAccounts = true) {
+            const sessionId = loginModal.sessionId;
+            if (loginPollTimer) {
+                clearInterval(loginPollTimer);
+                loginPollTimer = null;
+            }
+            loginModal.show = false;
+            loginModal.sessionId = '';
+            loginModal.qr = '';
+            loginModal.url = '';
+            if (sessionId) {
+                try {
+                    await props.api.cancelWeixinLoginSession(sessionId);
+                } catch (e) {
+                    console.warn(e);
+                }
+            }
+            if (reloadAccounts) await loadAccounts();
+        }
+
+        async function sendBrowserInput(payload) {
+            if (!loginModal.sessionId) return;
+            try {
+                await props.api.sendWeixinBrowserInput(loginModal.sessionId, payload);
+            } catch (e) {
+                console.warn('视频号页面操作失败:', getErrorMessage(e));
+            }
+        }
+
+        function browserPointerRatios(event) {
+            const rect = event.currentTarget.getBoundingClientRect();
+            return {
+                x_ratio: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+                y_ratio: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+            };
+        }
+
+        function handleBrowserClick(event) {
+            browserCanvasRef.value?.focus();
+            sendBrowserInput({ type: 'click', ...browserPointerRatios(event) });
+        }
+
+        function handleBrowserWheel(event) {
+            if (!loginModal.sessionId || browserWheelTimer) return;
+            const ratios = browserPointerRatios(event);
+            sendBrowserInput({
+                type: 'wheel',
+                ...ratios,
+                delta_x: event.deltaX,
+                delta_y: event.deltaY
+            });
+            browserWheelTimer = setTimeout(() => { browserWheelTimer = null; }, 80);
+        }
+
+        function handleBrowserKeydown(event) {
+            if (!loginModal.sessionId || ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(event.key)) return;
+            sendBrowserInput({ type: 'key', key: event.key, code: event.code || event.key });
+        }
+
+        function sendBrowserNavigation(type) {
+            sendBrowserInput({ type });
         }
 
         async function refreshAccount(id) {
@@ -2566,7 +3373,7 @@ app.component('weixin-page', {
                     }
                 }
             } catch (e) {
-                showMessage('选择文件失败: ' + (e.message || e), 'error');
+                showMessage('选择文件失败: ' + getErrorMessage(e), 'error');
             } finally {
                 isBrowsingBatchFiles.value = false;
             }
@@ -2717,6 +3524,26 @@ app.component('weixin-page', {
             }
         }
 
+        const activateTab = async (nextTab) => {
+            if (!nextTab || tab.value === nextTab) return;
+            tab.value = nextTab;
+            if (nextTab === 'tasks') {
+                await loadTasks();
+            } else if (nextTab === 'proxies') {
+                await Promise.all([loadProxyProfiles(), loadFavoriteLocations()]);
+            } else if (nextTab === 'schedule') {
+                await loadSchedules();
+            }
+        };
+
+        watch(() => props.initialTab, (nextTab) => {
+            activateTab(nextTab);
+        });
+
+        watch(accountDetailTab, (nextTab) => {
+            if (nextTab !== 'manage') hideNativeWeixinBrowser();
+        });
+
         onMounted(async () => {
             // 启动时先取一次刷新状态：后端 lifespan 已经在跑一次全量刷新，
             // 这里立刻 poll 进度并在刷新中显示遮罩
@@ -2729,21 +3556,43 @@ app.component('weixin-page', {
             loadProxyProfiles();
             // 批量上传页的位置下拉也依赖常用位置，提前加载一次
             loadFavoriteLocations();
+            if (tab.value === 'tasks') {
+                loadTasks();
+            } else if (tab.value === 'schedule') {
+                loadSchedules();
+            }
             // 监听全局 mousedown，点 combobox 外部时收起浮层（同时管发表位置 / 上传代理两个）
             document.addEventListener('mousedown', handleClickOutsideComboboxes);
+            window.addEventListener('resize', syncNativeBrowserBounds);
+            window.addEventListener('scroll', syncNativeBrowserBounds, true);
         });
 
         onBeforeUnmount(() => {
             stopRefreshPolling();
+            if (loginPollTimer) {
+                clearInterval(loginPollTimer);
+                loginPollTimer = null;
+            }
+            if (browserWheelTimer) clearTimeout(browserWheelTimer);
+            if (nativeStatusTimer) clearInterval(nativeStatusTimer);
+            if (nativeBrowserResizeObserver) nativeBrowserResizeObserver.disconnect();
+            hideNativeWeixinBrowser();
+            if (loginModal.sessionId) {
+                props.api.cancelWeixinLoginSession(loginModal.sessionId).catch(() => {});
+            }
             document.removeEventListener('mousedown', handleClickOutsideComboboxes);
+            window.removeEventListener('resize', syncNativeBrowserBounds);
+            window.removeEventListener('scroll', syncNativeBrowserBounds, true);
         });
 
         return {
             tab, accounts, tasks, selectedTaskIds, schedules, proxyProfiles,
+            selectedAccount, accountDetailTab, selectedAccountTasks, selectAccount, goAccountUpload,
             favoriteLocations, newFavoriteLocation,
             showLocationDropdown, locationComboboxRef, filteredFavoriteLocations, selectFavoriteLocation,
             showProxyDropdown, proxyComboboxRef, selectedProxyDisplay, selectProxyProfile,
-            showAddAccount, showProxyModal, newAccountName, message, refreshingIds,
+            showAddAccount, showProxyModal, newAccountName, message, refreshingIds, loginModal, browserCanvasRef,
+            browserHostRef, nativeBrowserVisible, hasNativeBrowser,
             isBrowsingBatchFiles, checkingAllProxies, refreshAllState,
             proxyForm, enabledProxyProfiles,
             batchForm, scheduleForm,
@@ -2753,7 +3602,10 @@ app.component('weixin-page', {
             toggleSelectAllTasks, deleteSelectedTasks,
             loadAccounts, loadTasks, loadSchedules, loadProxyProfiles, triggerRefreshAll,
             loadFavoriteLocations, addFavoriteLocation, deleteFavoriteLocation,
-            addAccount, loginAccount, refreshAccount, deleteAccount, openWeixinPostList,
+            addAccount, loginAccount, openAccountManagement, restartAccountBrowser, cancelEmbeddedLogin,
+            startNativeWeixinBrowser, reloadNativeWeixinBrowser, backNativeWeixinBrowser,
+            handleBrowserClick, handleBrowserWheel, handleBrowserKeydown, sendBrowserNavigation,
+            refreshAccount, deleteAccount, openWeixinPostList,
             openProxyModal, closeProxyModal, saveProxyProfile, deleteProxyProfile,
             checkProxyProfile, checkAllProxyProfiles,
             browseBatchFiles, removeBatchFile,

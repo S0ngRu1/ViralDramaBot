@@ -5,6 +5,7 @@
 """
 
 import json
+import shutil
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -91,11 +92,17 @@ class AccountManager:
         cookie_path = account["cookie_path"]
 
         page = None
+        login_profile_dir = None
         try:
-            page = get_browser_for_account(cookie_path)
+            page, login_profile_dir = self._create_qrcode_login_browser(cookie_path)
             logger.info(f"正在打开视频号登录页面...")
             page.get(WeixinConfig.LOGIN_URL)
             time.sleep(2)
+
+            # 新版登录页会优先展示「微信快捷登录」。本功能对应的是账号扫码登录，
+            # 不能直接使用浏览器记住的微信账号，否则多账号场景可能登录错账号。
+            # 因此检测到快捷登录卡片时，自动切换到二维码登录界面。
+            self._switch_to_qrcode_login(page)
 
             # 等待用户扫码（检测登录状态变化）
             logger.info("请使用微信扫描二维码登录...")
@@ -130,6 +137,8 @@ class AccountManager:
                     page.quit()
                 except Exception:
                     pass
+            if login_profile_dir:
+                shutil.rmtree(login_profile_dir, ignore_errors=True)
 
     def auto_login(self, account_id: int) -> bool:
         """
@@ -258,6 +267,7 @@ class AccountManager:
         """
         start_time = time.time()
         check_count = 0
+        closed_count = 0
 
         while time.time() - start_time < timeout:
             check_count += 1
@@ -268,8 +278,14 @@ class AccountManager:
 
             if result["error"]:
                 if "浏览器已关闭" in result["error"]:
-                    logger.info("检测到浏览器已关闭，停止等待扫码")
+                    closed_count += 1
+                    if closed_count < 3:
+                        logger.debug(f"第 {closed_count} 次检测到浏览器连接异常，继续等待以避免误判")
+                        time.sleep(2)
+                        continue
+                    logger.info("连续检测到浏览器已关闭，停止等待扫码")
                 return {"success": False, "message": result["error"]}
+            closed_count = 0
 
             # 每次检查后打印状态（每 5 次检查打印一次）
             if check_count % 5 == 0:
@@ -281,14 +297,65 @@ class AccountManager:
         return {"success": False, "message": "扫码超时，请重试"}
 
     @staticmethod
+    def _switch_to_qrcode_login(page: ChromiumPage) -> bool:
+        """
+        新版视频号登录页可能先展示「微信快捷登录」。
+
+        点击「使用其他头像、昵称或账号」切换到二维码，避免快捷登录误用
+        浏览器中记住的微信账号。页面本来就是二维码模式时不做任何操作。
+
+        Returns:
+            bool: 是否执行了从快捷登录到二维码登录的切换
+        """
+        switch_texts = (
+            "使用其他头像、昵称或账号",
+            "使用其他头像、昵称或帐号",
+            "使用其他账号",
+        )
+
+        for text in switch_texts:
+            try:
+                elem = page.ele(f"text:{text}", timeout=1)
+                if not elem or not elem.states.is_displayed:
+                    continue
+                elem.click()
+                logger.info("检测到微信快捷登录页，已自动切换为二维码登录")
+                return True
+            except Exception as e:
+                logger.debug(f"切换二维码登录入口失败（{text}）：{e}")
+
+        logger.info("当前已是二维码登录界面")
+        return False
+
+    @staticmethod
     def _is_browser_alive(page: ChromiumPage) -> bool:
         """检查浏览器进程是否还在运行"""
         try:
-            # 通过 WebSocket 连接状态判断：执行简单 JS，浏览器已断开时会抛异常
-            page.run_js("1+1")
+            # 不使用 run_js 做存活检测：新版视频号登录页刚渲染二维码时，
+            # 页面脚本环境可能短暂不可执行，容易被误判为用户关闭浏览器。
+            # 读取 url 只需要 DevTools 连接可用，更适合作为温和的存活探测。
+            _ = page.url
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            err_str = str(e).lower()
+            if any(kw in err_str for kw in (
+                "disconnected", "closed", "not reachable",
+                "connection refused", "connection reset",
+                "目标计算机积极拒绝", "远程主机强迫关闭",
+            )):
+                return False
+            # 未知异常不立刻判死，避免平台页面瞬时状态导致登录窗口被主动关闭。
+            logger.debug(f"浏览器存活检测出现非连接类异常，暂不判定关闭：{e}")
+            return True
+
+    @staticmethod
+    def _is_browser_closed_error(error: Exception) -> bool:
+        err_str = str(error).lower()
+        return any(kw in err_str for kw in (
+            "disconnected", "closed", "not reachable",
+            "connection refused", "connection reset",
+            "目标计算机积极拒绝", "远程主机强迫关闭",
+        ))
 
     def _check_login_status(self, page: ChromiumPage) -> dict:
         """
@@ -304,7 +371,12 @@ class AccountManager:
         try:
             url = page.url
 
-            # 检查是否已离开登录页面（登录成功）
+            # 新版登录完成后会进入 /platform/。该路由本身需要登录，未登录访问会
+            # 被重定向回 /login，因此无需再依赖易变的头像/昵称 DOM。
+            if "channels.weixin.qq.com" in url and "/platform/" in url:
+                return {"success": True, "error": None}
+
+            # 兼容旧版：检查是否已离开登录页面（登录成功）
             if "channels.weixin.qq.com" in url and "/login" not in url:
                 # 检查是否有用户信息元素 —— 给 Vue SPA 更多渲染时间，原来 2s 在
                 # 删除 time.sleep(3) 后偶尔不够；同时 cookie 兜底也能补上。
@@ -329,10 +401,7 @@ class AccountManager:
             return {"success": False, "error": "浏览器已关闭"}
 
         except Exception as e:
-            err_str = str(e).lower()
-            if any(kw in err_str for kw in ("disconnected", "closed", "not reachable",
-                                              "connection refused", "connection reset",
-                                              "目标计算机积极拒绝", "远程主机强迫关闭")):
+            if self._is_browser_closed_error(e):
                 return {"success": False, "error": "浏览器已关闭"}
             # 其他未知异常也可能是浏览器断开导致的，再次检测
             if not self._is_browser_alive(page):
@@ -347,42 +416,32 @@ class AccountManager:
             str: 错误信息，无错误返回 None
         """
         try:
-            # 常见的错误提示关键词
+            # 只匹配能够明确终止登录流程的提示。不能使用「异常」「错误」「失败」
+            # 这类泛词扫描整个页面：新版登录首页含有快捷登录、产品介绍以及隐藏的
+            # 状态节点，会造成误判并触发 finally 中的 page.quit() 提前关窗。
             error_keywords = [
                 "没有授权", "未授权", "授权失败", "登录失败",
-                "二维码已过期", "已过期", "已失效",
-                "异常", "错误", "失败", "无法登录",
-                "账号异常", "被封禁", "被限制"
+                "二维码已过期", "二维码已失效", "无法登录",
+                "账号异常", "账号被封禁", "账号被限制"
             ]
 
             # 尝试查找错误提示元素
             # 常见的错误提示选择器
             error_selectors = [
                 "css:.error-tip", "css:.error-msg", "css:.login-error",
-                "css:.qrcode-expired", "css:.tip-text", "css:.warning",
-                "css:[class*='error']", "css:[class*='tip']"
+                "css:.qrcode-expired"
             ]
 
             for selector in error_selectors:
                 try:
                     elem = page.ele(selector, timeout=0.5)
-                    if elem:
+                    if elem and elem.states.is_displayed:
                         text = elem.text.strip()
                         if text and any(keyword in text for keyword in error_keywords):
+                            logger.warning(f"检测到视频号登录错误提示：{text[:100]}")
                             return text
                 except Exception:
                     continue
-
-            # 检查页面上的所有文本节点（性能较差，作为后备方案）
-            body_text = page.ele("tag:body", timeout=1)
-            if body_text:
-                text = body_text.text
-                for keyword in error_keywords:
-                    if keyword in text:
-                        # 提取包含关键词的句子
-                        for line in text.split('\n'):
-                            if keyword in line:
-                                return line.strip()[:100]  # 限制长度
 
             return None
 
@@ -409,6 +468,45 @@ class AccountManager:
         # auto_port 让每个实例自动选可用端口。
         options.auto_port(True)
         return ChromiumPage(options)
+
+    @staticmethod
+    def _create_qrcode_login_browser(cookie_path: str, headless: Optional[bool] = None) -> tuple[ChromiumPage, Path]:
+        """为扫码登录创建干净的临时浏览器配置目录，避免旧会话导致窗口秒关。"""
+        WeixinConfig.ensure_dirs()
+        profile_root = WeixinConfig.COOKIES_DIR / "login_profiles"
+        profile_root.mkdir(parents=True, exist_ok=True)
+        profile_dir = profile_root / f"profile_{abs(hash(cookie_path))}_{int(time.time() * 1000)}"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        options = ChromiumOptions()
+        if WeixinConfig.BROWSER_PATH:
+            options.set_browser_path(WeixinConfig.BROWSER_PATH)
+        use_headless = WeixinConfig.BROWSER_HEADLESS if headless is None else headless
+        if use_headless:
+            options.headless()
+            # 视频号登录页有较大的最小内容宽度。无头浏览器默认的 800px 视口会
+            # 直接把右侧登录卡片裁掉，前端之后再怎么缩放也无法恢复缺失部分。
+            options.set_argument("--window-size=1920,1080")
+            options.set_argument("--force-device-scale-factor=1")
+        options.set_timeouts(page_load=WeixinConfig.PAGE_LOAD_TIMEOUT)
+        options.set_argument("--disable-blink-features=AutomationControlled")
+        options.set_argument("--disable-infobars")
+        options.set_argument("--no-sandbox")
+        options.set_argument("--no-first-run")
+        options.set_argument("--disable-sync")
+        options.set_argument("--disable-default-apps")
+        apply_weixin_proxy(options)
+        options.set_user_data_path(str(profile_dir))
+        options.auto_port(True)
+        page = ChromiumPage(options)
+        if use_headless:
+            try:
+                # DrissionPage 某些版本会用自身默认窗口覆盖 --window-size，
+                # 因此实例创建后再通过 CDP 固定一次实际窗口大小。
+                page.set.window.size(1920, 1080)
+            except Exception as exc:
+                logger.warning(f"设置登录页宽屏视口失败，将使用浏览器默认尺寸: {exc}")
+        return page, profile_dir
 
     def _save_cookies(self, page: ChromiumPage, cookie_path: str):
         """保存 Cookie 到文件"""
@@ -492,6 +590,13 @@ class AccountManager:
             account_id = account["id"]
             account_name = account["name"]
             try:
+                latest = self.dao.get_account(account_id)
+                if latest and latest["status"] == AccountStatus.LOGGING_IN.value:
+                    with stats_lock:
+                        stats["skipped"] += 1
+                    logger.info(f"[启动刷新] 账号 {account_name} 正在扫码登录中，跳过")
+                    return
+
                 lock = get_account_lock(account_id)
                 with lock:
                     ok = self._auto_login_internal(account_id)
