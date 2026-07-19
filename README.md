@@ -16,22 +16,31 @@
 - 下载页选择保存目录
 - 下载页自动识别并自定义视频名称
 - 视频名称规范化后保存
-- 视频管理页查看所有已索引视频
+- 素材库查看所有已索引视频
 - 全选、批量删除、打开文件、打开所在文件夹、复制路径
-- SQLite 视频索引
+- SQLite 视频索引；启动时扫描工作目录补录未索引 `.mp4`；可手动 `rescan`
 - 后台定时修复失效索引记录（每 300 秒）
 
 **微信视频号发布：**
 
-- 多账号管理（最多 50 个账号）
-- 扫码登录，Cookie 持久化；启动时与手动触发全量账号刷新
+- 多账号管理（最多 50 个账号）；支持批量删除
+- 扫码登录 / 应用内嵌入式登录（Cookie 持久化）；启动后延迟全量账号刷新
+- 账号详情：视频上传、视频号管理（嵌入浏览器）、发布记录、视频流量筛选
 - 批量视频上传（串行队列，支持代理 Profile 与发表位置）
 - 代理 Profile 管理、出口 IP 检测、常用发表位置
 - 定时发布（Cron 表达式 / 间隔分钟）
 - 视频号剧集链接关联
 - 任务重试、批量删除；批量上传全局队列
+- 概览页近 N 小时流量快照（按账号 / 剧集汇总）
+- 单账号低播放筛选与人工删稿
 - 后台 Cookie 有效性轮询（每 3600 秒）
 - 浏览器实例池管理；上传 CDN 域名 bypass 代理
+
+**运营与维护：**
+
+- 运营工作台概览（素材 / 账号 / 任务 / 代理 / 队列）
+- 运行日志实时查看（进程内缓冲）
+- 维护清理（日志、运行缓存、上传历史；不删账号与已下载视频）
 
 ### 规划中
 
@@ -68,7 +77,7 @@ python app.py
 
 启动后访问：
 
-- 首页（下载 / 管理 / 视频号 / 设置）: `http://localhost:8000`
+- 首页（概览 / 下载 / 素材库 / 账号 / 代理 / 日志 / 设置）: `http://localhost:8000`
 - 视频号独立页（精简版）: `http://localhost:8000/frontend/weixin.html`
 - Swagger: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
@@ -83,7 +92,7 @@ start-web.bat
 
 ## 主要功能
 
-### 1. 视频下载
+### 1. 素材下载
 
 - 输入抖音分享链接
 - 点击浏览按钮选择本地保存目录
@@ -97,9 +106,9 @@ start-web.bat
 - 按 `_` 切分后只保留前两个有效片段
 - 最终将这两个片段直接拼接后作为文件名
 
-### 2. 视频管理
+### 2. 素材库
 
-视频管理页显示的是 SQLite 索引中的全部视频，而不是当前保存目录下的文件。
+素材库显示的是 SQLite 索引中的全部视频，而不是当前保存目录下的文件。
 
 支持：
 
@@ -112,17 +121,21 @@ start-web.bat
 - 打开所在文件夹
 - 复制完整路径
 
+启动时会扫描当前工作目录下未索引的 `.mp4` 并补录；也可通过 `POST /api/videos/rescan` 手动触发。
+
 ### 3. 微信视频号发布
 
-在首页侧栏进入「视频号上传」，或打开独立页 `weixin.html`。详见 [src/publishing/weixin/README.md](./src/publishing/weixin/README.md)。
+在侧栏进入「账号管理」或「代理与位置」，或打开独立页 `weixin.html`。详见 [src/publishing/weixin/README.md](./src/publishing/weixin/README.md)。
 
 核心功能：
 
-- **账号管理**：创建账号 → 扫码登录 → Cookie 自动保存 → 可打开作品列表页
+- **账号管理**：创建账号 → 扫码 / 嵌入式登录 → Cookie 自动保存 → 可打开作品列表页
 - **批量上传**：多选本地视频 → 指定代理 Profile / 发表位置 → 入全局串行队列
+- **视频流量筛选**：按观察期 + 最低播放量筛出低播候选，支持勾选删稿
 - **发布位置管理**：维护多个代理 Profile、检测出口 IP、收藏常用地点
 - **定时发布**：支持 Cron 表达式或间隔分钟
 - **剧集关联**：支持关联视频号剧集
+- **运营概览**：近 24 小时账号 / 剧集播放汇总（可后台刷新）
 
 ### 4. 应用设置
 
@@ -131,7 +144,8 @@ start-web.bat
 - 默认保存目录
 - 下载超时时间、最大重试次数
 - 视频号上传超时、连续上传间隔、最大重试次数
-- （代理全局开关等已迁移至「视频号上传 → 发布位置管理」）
+- 维护清理（日志 / 缓存 / 上传历史）
+- （代理全局开关等已迁移至「代理与位置」）
 
 ---
 
@@ -150,14 +164,16 @@ ViralDramaBot/
 │   └── languages/
 │       └── ChineseSimplified.isl       # 安装向导简体中文（社区翻译）
 ├── frontend/
-│   ├── index.html                      # SPA 入口（下载/管理/视频号/设置）
+│   ├── index.html                      # SPA 入口
 │   ├── weixin.html                     # 视频号独立页（精简版）
 │   ├── app.js                          # Vue 3 前端逻辑
-│   └── style.css                       # 页面样式
+│   ├── style.css                       # 页面样式
+│   ├── logo.png / logo.ico
+│   └── vendor/                         # 本地 Vue / axios
 ├── src/
 │   ├── core/
 │   │   ├── config.py                   # 全局配置（含视频号代理项）
-│   │   ├── logger.py                   # 日志
+│   │   ├── logger.py                   # 日志（含内存缓冲）
 │   │   └── __init__.py
 │   ├── ingestion/
 │   │   └── douyin/
@@ -177,8 +193,14 @@ ViralDramaBot/
 │   │       ├── proxy.py                # 代理检测与出口 IP
 │   │       ├── geocoding.py            # IP 归属地
 │   │       ├── batch_queue.py          # 批量上传串行队列
+│   │       ├── channel_post.py         # 已发视频内存模型
+│   │       ├── post_list.py            # 拉取作品列表
+│   │       ├── post_delete.py          # 删稿
+│   │       ├── traffic_filter.py       # 低播放筛选与删稿
+│   │       ├── traffic_dashboard.py    # 概览流量快照
+│   │       ├── notification.py         # 作品优化建议（辅助）
 │   │       └── README.md
-│   ├── editing/                         # 编辑层（预留）
+│   ├── editing/                         # 编辑层（预留，含 capcut/）
 │   ├── workflow/                        # 工作流层（预留）
 │   └── utils/                           # 工具层（预留）
 ├── ARCHITECTURE.md
@@ -193,21 +215,22 @@ ViralDramaBot/
 ### 环境变量
 
 ```bash
-# 通用配置（未设置 WORK_DIR 时回退到用户目录 ~/.viraldramabot_data）
-set WORK_DIR=".data"
+# 通用配置（Web 启动时强制 WORK_DIR=%APPDATA%\ViralDramaBot）
+set WORK_DIR="%APPDATA%\ViralDramaBot"
 set DOWNLOAD_TIMEOUT="1200"
 set MAX_RETRIES="3"
 
 # 视频号配置
 set BROWSER_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 set WEIXIN_MAX_CONCURRENT_UPLOADS="1"
-set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="45"
+set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="30"
 set WEIXIN_UPLOAD_TIMEOUT="600"
 set WEIXIN_PROXY_ENABLED="true"
 set WEIXIN_PROXY_SCHEME="http"
 set WEIXIN_PROXY_HOST="127.0.0.1"
 set WEIXIN_PROXY_PORT="0"
 set WEIXIN_LOCATION_MODE="proxy_ip"
+set WEIXIN_STARTUP_REFRESH_DELAY_SEC="20"
 ```
 
 ### 默认配置
@@ -217,7 +240,7 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 - `DOWNLOAD_TIMEOUT = 1200`
 - `MAX_RETRIES = 3`
 - `WEIXIN_UPLOAD_TIMEOUT = 600`
-- `WEIXIN_INTER_UPLOAD_COOLDOWN_SEC = 20`（写入设置后同步；模块静态默认 45，见下）
+- `WEIXIN_INTER_UPLOAD_COOLDOWN_SEC = 30`
 - `WEIXIN_PROXY_ENABLED = true`
 
 视频号模块静态配置来自 [src/publishing/weixin/config.py](./src/publishing/weixin/config.py)：
@@ -225,38 +248,52 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 - `MAX_BROWSER_INSTANCES = 3`
 - `UPLOAD_TIMEOUT = 600`（运行时由全局配置覆盖）
 - `MAX_ACCOUNTS = 50`
-- `INTER_UPLOAD_COOLDOWN_SEC = 45`（环境变量默认；lifespan 后以全局设置为准）
+- `INTER_UPLOAD_COOLDOWN_SEC = 30`（环境变量默认；lifespan 后以全局设置为准）
 - `MAX_CONCURRENT_UPLOADS = 1`
 
 ---
 
 ## 存储说明
 
-开发环境下数据目录默认为项目根目录下的 `.data`（`app.py` 中 `DATA_DIR`）。打包为 exe 后，数据目录为 `%APPDATA%\ViralDramaBot`。
+开发版与打包版统一使用：
+
+```text
+%APPDATA%\ViralDramaBot\
+```
+
+`app.py` / `run_packaged.py` 启动早期会固定 `WORK_DIR`，不再使用项目 `.data` 或 `~/.viraldramabot_data` 作为运行时数据根目录。
 
 ### 视频文件
 
-视频文件保存到你在下载页或设置页选择的目录中。
+视频文件保存到你在下载页或设置页选择的目录中（可与数据目录不同）。
 
 ### 视频索引
 
-视频管理页的数据来自 SQLite 索引文件：
+素材库的数据来自 SQLite 索引文件：
 
 ```text
-{DATA_DIR}/metadata/video_index.db
+%APPDATA%\ViralDramaBot\metadata\video_index.db
 ```
 
 ### 视频号数据
 
-视频号模块的数据存储在：
-
 ```text
-{WORK_DIR}/weixin/
+%APPDATA%\ViralDramaBot\weixin\
 ├── weixin.db                           # 账号、任务、计划、代理 Profile、常用位置
+├── traffic_snapshot.json               # 概览页流量快照缓存
 ├── logs/
 └── cookies/                            # 账号 Cookie 文件
-    ├── <账号名>_<时间>.json
+    ├── account_<id>.json
+    ├── login_profiles/                 # 嵌入式登录临时 profile
     └── viewer/                         # 浏览器用户数据目录
+```
+
+### 其他
+
+```text
+%APPDATA%\ViralDramaBot\
+├── settings.json                       # 持久化设置
+└── logs\app.log                        # 应用日志文件
 ```
 
 ---
@@ -274,7 +311,7 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 视频号上传的关键点：
 
 - 批量提交经 `batch_queue` 全局串行，避免多批任务并行
-- 批内视频串行上传，成功后可按 `INTER_UPLOAD_COOLDOWN_SEC` 等待（默认 45s，可在设置中调小）
+- 批内视频串行上传，成功后可按 `INTER_UPLOAD_COOLDOWN_SEC` 等待（默认 30s，可在设置中调整）
 - 视频字节流 CDN 域名 bypass 代理，页面接口仍走代理以匹配发表位置
 - Cookie 后台轮询，每 3600 秒检查一次有效性
 - 模拟人类操作延迟，随机 0.5–2 秒

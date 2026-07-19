@@ -2,10 +2,11 @@
 
 ## 概览
 
-当前项目包含两大功能模块：
+当前项目包含两大功能模块，以及运营支撑能力：
 
-1. **抖音视频采集** - 解析链接、无水印下载、视频管理
-2. **微信视频号发布** - 多账号管理、自动上传、定时发布
+1. **抖音视频采集** - 解析链接、无水印下载、素材库管理
+2. **微信视频号发布** - 多账号管理、自动上传、定时发布、流量筛选与概览
+3. **运营与维护** - 工作台概览、运行日志、维护清理
 
 整体由四层组成：
 
@@ -29,13 +30,15 @@ ViralDramaBot/
 ├── build-exe.bat
 ├── frontend/
 │   ├── index.html                      # 主页面入口
-│   ├── weixin.html                     # 视频号管理页面
+│   ├── weixin.html                     # 视频号独立页（精简版）
 │   ├── app.js                          # Vue 3 前端逻辑
-│   └── style.css                       # 页面样式
+│   ├── style.css                       # 页面样式
+│   ├── logo.png / logo.ico
+│   └── vendor/                         # 本地 Vue / axios
 ├── src/
 │   ├── core/
 │   │   ├── config.py                   # 全局配置管理
-│   │   ├── logger.py                   # 日志系统
+│   │   ├── logger.py                   # 日志系统（文件 + 内存缓冲）
 │   │   └── __init__.py
 │   ├── ingestion/
 │   │   └── douyin/
@@ -56,8 +59,14 @@ ViralDramaBot/
 │   │       ├── proxy.py                # 代理检测
 │   │       ├── geocoding.py            # IP 归属地
 │   │       ├── batch_queue.py          # 批量上传队列
+│   │       ├── channel_post.py         # 已发视频 / 流量候选模型
+│   │       ├── post_list.py            # 拉取作品列表
+│   │       ├── post_delete.py          # 删稿 API 封装
+│   │       ├── traffic_filter.py       # 低播放筛选服务
+│   │       ├── traffic_dashboard.py    # 概览流量快照服务
+│   │       ├── notification.py         # 作品优化建议（辅助，暂无独立 API）
 │   │       └── README.md
-│   ├── editing/                         # 编辑层（预留）
+│   ├── editing/                         # 编辑层（预留，含 capcut/）
 │   ├── workflow/                        # 工作流层（预留）
 │   └── utils/                           # 工具层（预留）
 ├── ARCHITECTURE.md
@@ -90,7 +99,7 @@ src/ingestion/douyin/processor.py
 ```text
 用户
   ↓
-frontend/weixin.html + app.js
+frontend/index.html + app.js（账号管理 / 代理与位置）
   ↓
 app.py (FastAPI)
   ↓
@@ -101,14 +110,26 @@ src/publishing/weixin/browser.py (DrissionPage)
 微信视频号创作者中心
 ```
 
+### 流量筛选 / 概览链路
+
+```text
+用户
+  ↓
+app.py
+  ├─ traffic_filter.py  → post_list.py / post_delete.py
+  └─ traffic_dashboard.py → post_list.py → traffic_snapshot.json
+  ↓
+创作者中心 post_list / post_delete 接口
+```
+
 ### 并行支撑模块
 
 ```text
 app.py
   ├─ src/core/config.py
   ├─ src/core/logger.py
-  ├─ {DATA_DIR}/metadata/video_index.db   (抖音视频索引)
-  └─ {WORK_DIR}/weixin/weixin.db         (视频号数据)
+  ├─ %APPDATA%\ViralDramaBot\metadata\video_index.db
+  └─ %APPDATA%\ViralDramaBot\weixin\weixin.db
 ```
 
 ---
@@ -117,40 +138,52 @@ app.py
 
 ### `frontend/app.js`（SPA，挂载于 `index.html`）
 
-负责四个主页面：
+侧栏页面：
 
-- **视频下载**：单条/批量链接、并发下载、进度轮询
-- **视频管理**：索引列表、批量删除、打开文件/文件夹
-- **视频号上传**：账号、批量上传、任务列表、定时计划、发布位置管理（代理 Profile + 常用地点）
-- **应用设置**：保存目录、下载与视频号超时/重试/间隔
+- **概览**：素材 / 账号 / 任务 / 代理指标；近 N 小时流量快照
+- **素材下载**：单条/批量链接、并发下载、进度轮询
+- **素材库**：索引列表、批量删除、打开文件/文件夹
+- **账号管理**：账号 CRUD、嵌入式登录、批量上传、发布记录、流量筛选、定时计划
+- **代理与位置**：代理 Profile CRUD、出口 IP 检测、常用地点
+- **运行日志**：轮询 `/api/logs`
+- **设置**：保存目录、超时/重试/间隔、维护清理
 
 主要行为：
 
-- 浏览本地目录与多选视频文件（`browse-directory` / `browse-files`）
+- 浏览本地目录与多选视频文件（`browse-directory` / `browse-files` / `browse-file`）
 - 自动识别视频标题、名称规范化
 - 下载完成后刷新视频列表
 - 视频号批量上传入队、轮询账号刷新状态与任务列表
+- 嵌入式登录会话轮询与输入转发
 
 ### `frontend/weixin.html`
 
-独立精简版视频号页（无「发布位置管理」Tab），功能子集与 SPA 内视频号页类似，侧栏可跳回 `index.html`。
+独立精简版视频号页，功能子集与 SPA 内账号相关能力类似，侧栏可跳回 `index.html`。
 
 ### `app.py`
 
 负责：
 
 - 提供 Web API
+- 固定 `DATA_DIR = %APPDATA%\ViralDramaBot` 并设置 `WORK_DIR`
 - 维护下载进度状态
-- 管理 SQLite 视频索引
+- 管理 SQLite 视频索引（含启动扫描补录）
 - 处理打开文件、打开目录等本地操作
 - 启动后台索引修复任务
-- 启动视频号模块（账号管理、上传调度、Cookie 轮询）
+- 启动视频号模块（账号管理、上传调度、Cookie 轮询、批量队列）
+- 嵌入式登录会话、运营概览与维护清理
 
 主要接口包括：
 
 **抖音 / 通用：**
 - `GET /` — 重定向至 `/frontend/index.html`
 - `GET /api/status`
+- `GET /api/health` — 轻量探活（桌面版启动检测）
+- `GET /api/logs` — 进程内日志缓冲
+- `POST /api/maintenance/cleanup` — 清理日志 / 缓存 / 上传历史
+- `GET /api/dashboard` — 运营工作台聚合
+- `GET /api/dashboard/traffic` — 流量快照
+- `POST /api/dashboard/traffic/refresh` — 后台刷新流量快照
 - `POST /api/videos/download` — 支持 `link` / `links` / `tasks[]`，`max_concurrent`（1–10），最多 50 条
 - `POST /api/videos/parse`
 - `GET /api/videos`
@@ -159,9 +192,11 @@ app.py
 - `POST /api/videos/batch-delete`
 - `POST /api/videos/{video_id}/open`
 - `POST /api/videos/{video_id}/open-folder`
+- `POST /api/videos/rescan` — 扫描工作目录补录索引
 - `GET /api/download-progress`
 - `GET /api/browse-directory`
 - `GET /api/browse-files`
+- `GET /api/browse-file`
 - `GET /api/settings`
 - `PUT /api/settings`
 
@@ -177,12 +212,20 @@ app.py
 **视频号 — 账号：**
 - `POST|GET /api/weixin/accounts`
 - `DELETE /api/weixin/accounts/{account_id}`
+- `POST /api/weixin/accounts/batch-delete`
 - `POST /api/weixin/accounts/{account_id}/login`
+- `POST /api/weixin/accounts/{account_id}/login-embedded`
+- `GET /api/weixin/login-sessions/{session_id}`
+- `POST /api/weixin/login-sessions/{session_id}/input`
+- `POST /api/weixin/login-sessions/{session_id}/cancel`
 - `POST /api/weixin/accounts/{account_id}/refresh`
 - `POST /api/weixin/accounts/{account_id}/open-post-list`
 - `POST /api/weixin/accounts/check-cookies`
 - `GET /api/weixin/accounts/refresh-status`
 - `POST /api/weixin/accounts/refresh-all`
+- `POST /api/weixin/accounts/{account_id}/traffic/scan`
+- `GET /api/weixin/accounts/{account_id}/traffic/scan-status`
+- `POST /api/weixin/accounts/{account_id}/traffic/delete`
 
 **视频号 — 上传与任务：**
 - `POST /api/weixin/upload/batch` — 创建任务并入全局串行队列
@@ -212,12 +255,12 @@ app.py
 - `download_timeout`
 - `max_retries`
 - `weixin_upload_timeout`
-- `weixin_inter_upload_cooldown`
+- `weixin_inter_upload_cooldown`（默认 30）
 - `weixin_max_retries`
 - `weixin_proxy_enabled` / `weixin_proxy_scheme` / `weixin_proxy_host` / `weixin_proxy_port`
 - `weixin_location_mode`（`proxy_ip` | `hidden`）
 
-开发环境 `app.py` 将 `DATA_DIR` 设为项目 `.data`；打包 exe 时为 `%APPDATA%\ViralDramaBot`。视频索引库路径为 `{DATA_DIR}/metadata/video_index.db`。
+Web / 桌面版统一：`app.py` 将 `DATA_DIR` 设为 `%APPDATA%\ViralDramaBot`。视频索引库路径为 `{DATA_DIR}/metadata/video_index.db`。
 
 ### `src/ingestion/douyin/downloader.py`
 
@@ -251,7 +294,7 @@ app.py
 - 视频号模块全局配置
 - 浏览器配置（路径、超时、实例数）
 - 上传配置（并发数、重试、格式限制）
-- 数据目录配置
+- 数据目录配置（默认落在 `%APPDATA%\ViralDramaBot\weixin`）
 
 核心配置项：
 
@@ -259,10 +302,11 @@ app.py
 - `MAX_BROWSER_INSTANCES` - 最大浏览器实例数（默认 3）
 - `UPLOAD_TIMEOUT` - 上传超时（默认 600 秒）
 - `MAX_CONCURRENT_UPLOADS` - 最大并发上传数（默认 1）
-- `INTER_UPLOAD_COOLDOWN_SEC` - 连续上传间隔（环境变量默认 45 秒，lifespan 同步全局设置）
+- `INTER_UPLOAD_COOLDOWN_SEC` - 连续上传间隔（环境变量默认 30 秒，lifespan 同步全局设置）
 - `MAX_ACCOUNTS` - 最大账号数（默认 50）
 - `UPLOAD_BYPASS_HOSTS` - 上传 CDN 不走代理的域名通配符
 - `PROXY_ENABLED` / `PROXY_SCHEME` / `PROXY_HOST` / `PROXY_PORT` / `LOCATION_MODE`
+- `DEFAULT_FAVORITE_LOCATION` - 常用位置种子数据
 
 ### `src/publishing/weixin/schemas.py`
 
@@ -277,29 +321,33 @@ app.py
 
 - `AccountStatus` - active / expired / logging_in / error
 - `TaskStatus` - pending / uploading / processing / filling / publishing / completed / failed / cancelled
-- `AccountCreate` / `AccountInfo`
+- `AccountCreate` / `AccountInfo` / `AccountBatchDelete`
 - `UploadTaskCreate` / `TaskInfo`
 - `BatchUploadCreate`
 - `ScheduleCreate` / `ScheduleInfo`
+- `TrafficScanRequest` / `TrafficDeleteRequest`
 
 ### `src/publishing/weixin/dao.py`
 
 负责：
 
 - SQLite 数据访问层
-- 账号表 CRUD
+- 账号表 CRUD（含 `avatar_url` / `wechat_id` 资料回写）
 - 上传任务表 CRUD
 - 定时计划表 CRUD
+- 代理 Profile / 常用位置 CRUD
+- 批量删除账号与任务、清理上传历史
 
 ### `src/publishing/weixin/account_manager.py`
 
 负责：
 
-- 账号创建和删除
+- 账号创建和删除（含批量删除，跳过有进行中任务的账号）
 - 扫码登录流程
 - Cookie 保存和加载
 - 自动登录验证
 - 批量 Cookie 有效性检查
+- 登录后拉取昵称 / 头像 / uniqId
 
 核心流程：
 
@@ -331,6 +379,7 @@ app.py
 - 元数据填写
 - 定时发布设置
 - 剧集链接关联
+- 代理与发表位置处理（代理不可用时可降级为不显示位置）
 
 核心流程：
 
@@ -376,6 +425,37 @@ app.py
 
 - 多个「批量上传」请求的全局 FIFO 串行执行
 - `submit()` 入队、`snapshot()` 供 API 查询队列状态
+
+### `src/publishing/weixin/post_list.py` / `post_delete.py` / `channel_post.py`
+
+负责：
+
+- 从创作者中心拉取已发视频列表（播放量、发布时间等）
+- 调用删稿接口
+- 定义 `ChannelPost` / `TrafficCandidate` 内存模型
+
+### `src/publishing/weixin/traffic_filter.py`
+
+负责：
+
+- 按观察期（默认 48 小时）与最低播放量（默认 1000）筛出低播候选
+- 后台线程扫描，前端轮询 `scan-status`
+- 勾选后调用 `post_delete` 删稿
+
+### `src/publishing/weixin/traffic_dashboard.py`
+
+负责：
+
+- 拉取各账号近 N 小时作品，按账号与剧集链接聚合播放量
+- 结果缓存到 `weixin/traffic_snapshot.json`
+- 概览页读取快照；`refresh` 在后台线程执行
+
+### `src/publishing/weixin/notification.py`
+
+负责：
+
+- 拉取消息中心「作品优化建议」
+- 当前无独立 HTTP API，供后续扩展或内部复用
 
 ---
 
@@ -436,10 +516,10 @@ batch_upload_queue.submit() 入全局队列（多批串行）
 前端轮询任务状态
 ```
 
-### 视频管理流程
+### 素材库流程
 
 ```text
-前端打开视频管理页
+前端打开素材库
   ↓
 GET /api/videos
   ↓
@@ -462,13 +542,29 @@ app.py 更新 SQLite 索引
 前端刷新列表
 ```
 
+### 流量筛选流程
+
+```text
+POST .../traffic/scan（观察期 + min_views）
+  ↓
+TrafficFilterService 后台拉取 post_list
+  ↓
+筛选发表超过观察期且播放量过低的候选
+  ↓
+前端轮询 .../traffic/scan-status
+  ↓
+用户勾选后 POST .../traffic/delete
+  ↓
+post_delete 删稿
+```
+
 ---
 
 ## 数据库设计
 
 ### 视频索引数据库
 
-位置：`{DATA_DIR}/metadata/video_index.db`（开发环境一般为 `.data/metadata/video_index.db`）
+位置：`%APPDATA%\ViralDramaBot\metadata\video_index.db`
 
 ```sql
 CREATE TABLE videos (
@@ -483,13 +579,14 @@ CREATE TABLE videos (
 
 设计目标：
 
-- 不再依赖当前保存目录扫描
+- 不再依赖当前保存目录扫描作为唯一来源
 - 能管理不同目录下的历史下载文件
 - 提高列表读取和批量删除效率
+- 启动时 / `rescan` 可补录工作目录下未索引的 `.mp4`
 
 ### 视频号数据库
 
-位置：`.data/weixin/weixin.db`
+位置：`%APPDATA%\ViralDramaBot\weixin\weixin.db`
 
 ```sql
 -- 账号表
@@ -497,6 +594,7 @@ CREATE TABLE accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     wechat_id TEXT,
+    avatar_url TEXT,
     status TEXT NOT NULL DEFAULT 'expired',
     cookie_path TEXT,
     created_at TEXT NOT NULL,
@@ -523,6 +621,7 @@ CREATE TABLE upload_tasks (
     proxy_location TEXT,
     proxy_profile_id INTEGER,
     location_label TEXT,
+    drama_link TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
@@ -572,6 +671,7 @@ CREATE TABLE schedules (
 CREATE INDEX idx_tasks_status ON upload_tasks(status);
 CREATE INDEX idx_tasks_account ON upload_tasks(account_id);
 CREATE INDEX idx_accounts_status ON accounts(status);
+CREATE INDEX idx_proxy_profiles_enabled ON proxy_profiles(enabled, id);
 ```
 
 ---
@@ -585,25 +685,30 @@ CREATE INDEX idx_accounts_status ON accounts(status);
 - 间隔：`INDEX_REPAIR_INTERVAL_SECONDS = 300`
 - 功能：删除索引中磁盘已不存在的视频记录
 
-### 2. Cookie 轮询（`CookieChecker`）
+### 2. 工作目录扫描补录（`scan_and_import_videos`）
+
+- 启动时后台执行一次
+- 将当前 `config.work_path` 下未索引的 `.mp4` 写入索引
+
+### 3. Cookie 轮询（`CookieChecker`）
 
 - 间隔：3600 秒（`COOKIE_CHECK_INTERVAL_SECONDS`）
 - 功能：检查活跃账号 Cookie，失效则标记 `expired`
 
-### 3. 定时发布调度（`UploadScheduler`）
+### 4. 定时发布调度（`UploadScheduler`）
 
 - 引擎：APScheduler，时区 `Asia/Shanghai`
 - 支持：Cron 表达式、间隔分钟
 - 功能：按计划创建并执行上传任务
 
-### 4. 批量上传队列（`batch_upload_queue`）
+### 5. 批量上传队列（`batch_upload_queue`）
 
 - 全局 FIFO，保证多个 batch 请求不会并行跑浏览器
 - 停止应用时 `batch_upload_queue.stop()`
 
-### 5. 启动时全量账号刷新
+### 6. 启动时全量账号刷新
 
-- `run_refresh_all_accounts()` 在后台线程执行，不阻塞启动
+- 默认延迟 `WEIXIN_STARTUP_REFRESH_DELAY_SEC`（默认 20 秒）后，在后台线程执行 `run_refresh_all_accounts()`
 - 前端通过 `GET /api/weixin/accounts/refresh-status` 轮询进度
 
 ---
@@ -629,9 +734,9 @@ CREATE INDEX idx_accounts_status ON accounts(status);
 - 浏览本地目录
 - 打开视频文件
 - 打开所在文件夹
-- 控制本地浏览器（视频号上传）
+- 控制本地浏览器（视频号上传 / 嵌入式登录）
 
-这些操作依赖服务端运行机器本身的桌面环境，因此当前架构更适合本机工具型使用，不适合直接当成纯远程无界面服务。
+这些操作依赖服务端运行机器本身的桌面环境，因此当前架构更适合本机工具型使用，不适合直接当成纯远程云界面服务。
 
 ---
 

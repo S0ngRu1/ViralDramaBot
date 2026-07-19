@@ -2,14 +2,17 @@
 
 ## 功能概览
 
-主应用为单页应用（`frontend/index.html` + `app.js`），包含四个页面：
+主应用为单页应用（`frontend/index.html` + `app.js`），侧栏包含：
 
-1. `📥 视频下载` — 单条或批量下载抖音视频
-2. `📺 视频管理` — SQLite 索引中的全部视频
-3. `📤 视频号上传` — 账号、批量上传、任务、定时、发布位置管理
-4. `⚙️ 应用设置` — 保存目录与超时/重试等
+1. `📊 概览` — 运营工作台（素材 / 账号 / 任务 / 代理指标 + 近 N 小时流量）
+2. `📥 素材下载` — 单条或批量下载抖音视频
+3. `🎬 素材库` — SQLite 索引中的全部视频
+4. `👤 账号管理` — 账号、批量上传、发布记录、流量筛选、定时计划、嵌入式登录
+5. `🌐 代理与位置` — 代理 Profile 与常用发表位置
+6. `📋 运行日志` — 进程内实时日志
+7. `⚙️ 设置` — 保存目录、超时/重试、维护清理
 
-另提供精简独立页：`http://localhost:8000/frontend/weixin.html`（无「发布位置管理」Tab）。
+另提供精简独立页：`http://localhost:8000/frontend/weixin.html`。
 
 ---
 
@@ -45,7 +48,13 @@ start-web.bat
 
 ## 页面说明
 
-### 1. 视频下载
+### 1. 概览
+
+- 展示素材总数、账号状态分布、任务状态、代理启用数、上传队列
+- 近 24 小时流量快照：按账号 / 剧集链接汇总播放量
+- 「刷新流量数据」触发后台拉取；前端轮询直至完成
+
+### 2. 素材下载
 
 - 输入一条或多条抖音短链接/长链接（批量最多 50 条）
 - 可设置并发数（1–10，默认 6）
@@ -59,28 +68,41 @@ start-web.bat
 - 按 `_` 切分后只取前两个有效片段
 - 最终将两段直接拼接为实际保存名
 
-### 2. 视频管理
+### 3. 素材库
 
 列表来自 SQLite 索引，而非当前保存目录扫描。
 
 支持：全选/取消、批量删除、打开文件、打开所在文件夹、复制完整路径。
 
-### 3. 视频号上传
+启动时会扫描当前工作目录下未索引的 `.mp4` 并补录。
 
-Tab 包括：
+### 4. 账号管理
 
-- **账号管理** — 创建、扫码登录、刷新、打开作品列表、删除
-- **批量上传** — 多选视频、选账号、代理 Profile、发表位置、剧集名
-- **任务列表** — 筛选、批量删除、重试失败任务
-- **定时发布** — Cron 或间隔分钟
-- **发布位置管理** — 代理 Profile CRUD、检测出口 IP、常用地点
+选中账号后的 Tab 包括：
 
-### 4. 应用设置
+- **视频上传** — 多选视频、代理 Profile、发表位置、剧集名、入队上传
+- **视频号管理** — 应用内嵌入浏览器（登录 / 后台操作）
+- **发布记录** — 任务筛选、批量删除、重试
+- **视频流量筛选** — 观察期 + 最低播放量扫描，勾选删稿
+
+另支持：创建账号、扫码登录、批量删除账号、定时发布计划。
+
+### 5. 代理与位置
+
+- 代理 Profile CRUD、检测出口 IP
+- 常用发表位置收藏（批量上传时可下拉选择）
+
+### 6. 运行日志
+
+轮询 `GET /api/logs`，展示进程内最新日志（最多约 500 条，重启清空）。
+
+### 7. 应用设置
 
 - 视频保存目录、下载超时、最大重试
 - 视频号上传超时、连续上传间隔、最大重试
+- **维护清理**：清除日志、运行缓存、上传历史（不删账号 Cookie 与已下载视频文件）
 
-代理全局开关已迁移至「发布位置管理」；设置页中对应卡片已隐藏，但 API 仍支持 `weixin_proxy_*` 字段。
+代理全局开关已迁移至「代理与位置」；设置页中对应卡片已隐藏，但 API 仍支持 `weixin_proxy_*` 字段。
 
 ---
 
@@ -100,7 +122,7 @@ Content-Type: application/json
 ```json
 {
   "link": "https://v.douyin.com/xxxxx/",
-  "save_path": ".data",
+  "save_path": "C:\\Videos",
   "file_name": "视频标题",
   "max_concurrent": 6
 }
@@ -114,7 +136,7 @@ Content-Type: application/json
     { "link": "https://v.douyin.com/aaa/", "file_name": "第一集" },
     { "link": "https://v.douyin.com/bbb/", "file_name": "" }
   ],
-  "save_path": ".data",
+  "save_path": "C:\\Videos",
   "max_concurrent": 4
 }
 ```
@@ -127,7 +149,7 @@ Content-Type: application/json
   "message": "批量下载任务已启动，共 2 个，并发 4",
   "total_count": 2,
   "max_concurrent": 4,
-  "save_path": "/absolute/path/to/.data"
+  "save_path": "/absolute/path/to/Videos"
 }
 ```
 
@@ -155,6 +177,7 @@ GET /api/download-progress
 ```http
 GET /api/browse-directory
 GET /api/browse-files
+GET /api/browse-file
 ```
 
 `browse-files` 返回多选视频路径列表，供视频号批量上传使用。
@@ -168,6 +191,7 @@ DELETE /api/videos/{video_id}
 POST /api/videos/batch-delete
 POST /api/videos/{video_id}/open
 POST /api/videos/{video_id}/open-folder
+POST /api/videos/rescan
 ```
 
 ### 应用设置
@@ -181,11 +205,11 @@ PUT /api/settings
 
 ```json
 {
-  "video_dir": ".data",
+  "video_dir": "C:\\Videos",
   "download_timeout": 1200,
   "max_retries": 3,
   "weixin_upload_timeout": 600,
-  "weixin_inter_upload_cooldown": 20,
+  "weixin_inter_upload_cooldown": 30,
   "weixin_max_retries": 3,
   "weixin_proxy_enabled": true,
   "weixin_proxy_scheme": "http",
@@ -195,10 +219,31 @@ PUT /api/settings
 }
 ```
 
-### 系统状态
+### 系统状态 / 健康 / 日志 / 维护
 
 ```http
 GET /api/status
+GET /api/health
+GET /api/logs?since=0&limit=100
+POST /api/maintenance/cleanup
+```
+
+维护清理请求体示例：
+
+```json
+{
+  "logs": true,
+  "cache": true,
+  "upload_history": true
+}
+```
+
+### 运营概览
+
+```http
+GET /api/dashboard
+GET /api/dashboard/traffic
+POST /api/dashboard/traffic/refresh?hours=24
 ```
 
 ---
@@ -247,12 +292,34 @@ POST /api/weixin/tasks/{task_id}/retry
 POST /api/weixin/accounts
 GET /api/weixin/accounts
 POST /api/weixin/accounts/{account_id}/login
+POST /api/weixin/accounts/{account_id}/login-embedded
+GET /api/weixin/login-sessions/{session_id}
+POST /api/weixin/login-sessions/{session_id}/input
+POST /api/weixin/login-sessions/{session_id}/cancel
 POST /api/weixin/accounts/{account_id}/refresh
 POST /api/weixin/accounts/{account_id}/open-post-list
 POST /api/weixin/accounts/check-cookies
 GET /api/weixin/accounts/refresh-status
 POST /api/weixin/accounts/refresh-all
 DELETE /api/weixin/accounts/{account_id}
+POST /api/weixin/accounts/batch-delete
+```
+
+### 流量筛选
+
+```http
+POST /api/weixin/accounts/{account_id}/traffic/scan
+GET /api/weixin/accounts/{account_id}/traffic/scan-status
+POST /api/weixin/accounts/{account_id}/traffic/delete
+```
+
+扫描请求体示例：
+
+```json
+{
+  "grace_period_hours": 48,
+  "min_views": 1000
+}
 ```
 
 ### 代理与常用位置
@@ -281,14 +348,20 @@ DELETE /api/weixin/schedule/{schedule_id}
 
 ## 存储说明
 
-### 开发环境
+### 统一数据目录
 
-默认数据目录：项目根目录 `.data`（由 `app.py` 的 `DATA_DIR` 决定）。
+开发版与打包版均为：
+
+```text
+%APPDATA%\ViralDramaBot\
+```
+
+由 `app.py` 在导入微信模块前固定 `WORK_DIR`，不再使用项目 `.data` 或 `~/.viraldramabot_data` 作为运行时根目录。
 
 ### 视频索引
 
 ```text
-.data/metadata/video_index.db
+%APPDATA%\ViralDramaBot\metadata\video_index.db
 ```
 
 字段：`video_id`, `title`, `file_path`, `file_size`, `created_at`, `save_dir`。
@@ -296,11 +369,10 @@ DELETE /api/weixin/schedule/{schedule_id}
 ### 视频号数据
 
 ```text
-{WORK_DIR}/weixin/weixin.db
-{WORK_DIR}/weixin/cookies/
+%APPDATA%\ViralDramaBot\weixin\weixin.db
+%APPDATA%\ViralDramaBot\weixin\cookies\
+%APPDATA%\ViralDramaBot\weixin\traffic_snapshot.json
 ```
-
-`WORK_DIR` 未设置环境变量时，模块使用 `~/.viraldramabot_data`；Web 应用启动后会将工作目录设为 `DATA_DIR`（开发下即 `.data`）。
 
 ### 索引修复
 
@@ -311,23 +383,23 @@ DELETE /api/weixin/schedule/{schedule_id}
 ## 使用建议
 
 - 大文件下载建议 `download_timeout` 保持 **1200** 秒左右
-- 视频号批量上传间隔：模块环境变量默认 **45** 秒，可在设置中调低；代理不稳定时勿设过小
-- 「打开文件/文件夹」、扫码登录依赖本机桌面与 Edge 浏览器
-- 视频管理页不扫描磁盘历史文件；仅显示已写入索引的下载记录
+- 视频号批量上传间隔：默认 **30** 秒，可在设置中调整；代理不稳定时勿设过小
+- 「打开文件/文件夹」、扫码 / 嵌入式登录依赖本机桌面与 Edge 浏览器
+- 素材库以索引为准；工作目录下的 `.mp4` 会在启动或 `rescan` 时补录
 
 ---
 
 ## 常见问题
 
-### 1. 磁盘里已有 mp4，管理页看不到
+### 1. 磁盘里已有 mp4，素材库看不到
 
-当前不会自动补录索引，只有通过本工具下载并成功写入索引的才会显示。
+若文件不在当前工作目录，不会自动出现。工作目录内的 `.mp4` 会在启动扫描或调用 `POST /api/videos/rescan` 后补录；其他目录需通过本工具下载写入索引。
 
 ### 2. 下载后如何看保存路径
 
-下载页进度卡片与视频管理页均显示完整路径，支持复制。
+下载页进度卡片与素材库均显示完整路径，支持复制。
 
-### 3. 下载完成为何不自动跳转管理页
+### 3. 下载完成为何不自动跳转素材库
 
 设计为留在下载页并刷新列表，不自动切 Tab。
 

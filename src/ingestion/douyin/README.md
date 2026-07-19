@@ -179,6 +179,11 @@ stream=True 发起 GET 请求
 - `POST /api/videos/download` — 单条或批量下载（`link` / `links` / `tasks[]`，`max_concurrent` 1–10，最多 50 条）
 - `GET /api/download-progress` — 轮询进度（批量时为聚合进度）
 
+相关但由 `app.py` 维护（非本模块）：
+
+- `GET /api/videos` / 删除 / 打开文件
+- `POST /api/videos/rescan` — 扫描工作目录补录未索引 `.mp4`
+
 调用路径：
 
 ```text
@@ -196,14 +201,14 @@ DouyinProcessor
 下载完成后，`app.py` 会把返回的文件信息写入 SQLite 视频索引：
 
 ```text
-.data/metadata/video_index.db
+%APPDATA%\ViralDramaBot\metadata\video_index.db
 ```
 
 注意：
 
 - 本模块只负责解析和下载
-- 视频管理页的数据并不是由本模块直接维护
-- 索引和列表管理逻辑在 `app.py`
+- 素材库的数据并不是由本模块直接维护
+- 索引和列表管理逻辑在 `app.py`（含启动扫描补录）
 
 ---
 
@@ -270,7 +275,7 @@ print(file_path)
 
 默认值：
 
-- `WORK_DIR`：环境变量未设置时为 `~/.viraldramabot_data`；Web 应用启动后通常使用 `app.py` 的 `DATA_DIR`（开发环境为 `.data`）
+- `WORK_DIR`：`Config` 单独导入时未设置环境变量会回退到 `~/.viraldramabot_data`；经 `app.py` / `run_packaged.py` 启动时强制为 `%APPDATA%\ViralDramaBot`
 - `DOWNLOAD_TIMEOUT = 1200`
 - `MAX_RETRIES = 3`
 
@@ -298,11 +303,11 @@ print(file_path)
 - requests 重试
 - Web 层 SQLite 索引
 
-### 3. 为什么模块本身不负责视频管理页
+### 3. 为什么模块本身不负责素材库
 
 因为当前职责分层是：
 
 - `processor.py` / `downloader.py` 只负责采集
-- `app.py` 负责索引、列表、删除和本地文件操作
+- `app.py` 负责索引、列表、删除、启动扫描补录和本地文件操作
 
 这样可以保持采集层更简单，也更容易扩展到其他平台。

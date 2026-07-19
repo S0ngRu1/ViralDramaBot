@@ -1,17 +1,19 @@
 # 微信视频号发布模块
 
-自动化微信视频号视频发布，支持多账号管理、批量上传、定时发布。
+自动化微信视频号视频发布，支持多账号管理、批量上传、定时发布、流量筛选与运营概览。
 
 ---
 
 ## 功能概览
 
-- **多账号管理**：最多 50 个视频号账号，扫码登录，Cookie 持久化
+- **多账号管理**：最多 50 个视频号账号；扫码登录 / 嵌入式登录；Cookie 持久化；批量删除
 - **批量上传**：多视频入全局串行队列，批内逐个 `upload_video`
 - **代理 Profile**：多线路管理、出口 IP 检测、上传时按 Profile 走代理
 - **发表位置**：常用地点收藏；支持按代理 IP 反查或手动选点
 - **定时发布**：支持 Cron 表达式或间隔分钟
 - **剧集关联**：支持关联视频号剧集
+- **流量筛选**：按观察期 + 最低播放量筛出低播候选，支持勾选删稿
+- **流量概览**：近 N 小时按账号 / 剧集汇总播放量（快照缓存）
 - **Cookie 轮询**：每小时检查一次 Cookie 有效性
 - **浏览器池**：管理并发浏览器实例，避免资源争抢
 
@@ -32,7 +34,14 @@ src/publishing/weixin/
 ├── metadata.py                 # 标题/描述/标签解析
 ├── proxy.py                    # 代理连通性与出口 IP
 ├── geocoding.py                # IP 归属地
-└── batch_queue.py              # 多批 upload/batch 的全局串行队列
+├── batch_queue.py              # 多批 upload/batch 的全局串行队列
+├── channel_post.py             # ChannelPost / TrafficCandidate 模型
+├── post_list.py                # 拉取已发视频列表
+├── post_delete.py              # 删稿
+├── traffic_filter.py           # 低播放筛选服务
+├── traffic_dashboard.py        # 概览流量快照
+├── notification.py             # 作品优化建议（辅助，暂无独立 API）
+└── README.md
 ```
 
 ---
@@ -54,8 +63,12 @@ src/publishing/weixin/
   ↓
 保存 Cookie 到 JSON 文件
   ↓
+拉取昵称 / 头像 / uniqId 回写账号
+  ↓
 更新账号状态为 active
 ```
+
+嵌入式登录（`login-embedded`）在无头浏览器中运行，前端轮询会话并转发鼠标/键盘事件，用于应用内「视频号管理」Tab。
 
 ### 2. 视频上传流程
 
@@ -104,6 +117,20 @@ APScheduler 注册触发器
   └─ 全部完成后停用计划
 ```
 
+### 4. 流量筛选流程
+
+```text
+POST .../traffic/scan
+  ↓
+后台拉取 post_list
+  ↓
+筛出：发表超过观察期 且 播放量 < min_views
+  ↓
+前端轮询 scan-status
+  ↓
+POST .../traffic/delete → post_delete
+```
+
 ---
 
 ## 配置说明
@@ -117,8 +144,11 @@ set BROWSER_PATH="C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 # 最大并发上传数（默认 1，建议保持串行）
 set WEIXIN_MAX_CONCURRENT_UPLOADS="1"
 
-# 连续上传间隔秒数（config.py 环境变量默认 45；全局设置页默认 20，lifespan 会覆盖）
-set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="45"
+# 连续上传间隔秒数（环境变量与全局默认均为 30；设置页可覆盖）
+set WEIXIN_INTER_UPLOAD_COOLDOWN_SEC="30"
+
+# 启动后延迟刷新全部账号（秒，默认 20）
+set WEIXIN_STARTUP_REFRESH_DELAY_SEC="20"
 
 # 代理（与 src/core/config.py 对齐）
 set WEIXIN_PROXY_ENABLED="true"
@@ -137,12 +167,13 @@ set WEIXIN_LOCATION_MODE="proxy_ip"
 | `BROWSER_HEADLESS` | False | 是否无头模式（扫码需关闭） |
 | `PAGE_LOAD_TIMEOUT` | 30 | 页面加载超时（秒） |
 | `UPLOAD_TIMEOUT` | 600 | 上传超时（秒，运行时由全局配置覆盖） |
-| `INTER_UPLOAD_COOLDOWN_SEC` | 45 | 批内连续上传间隔（秒） |
+| `INTER_UPLOAD_COOLDOWN_SEC` | 30 | 批内连续上传间隔（秒） |
 | `MAX_CONCURRENT_UPLOADS` | 1 | 最大并发上传数 |
 | `MAX_RETRIES` | 3 | 最大重试次数 |
 | `MAX_ACCOUNTS` | 50 | 最大账号数 |
 | `UPLOAD_BYPASS_HOSTS` | 见源码 | 上传 CDN 不走代理的域名 |
 | `PROXY_ENABLED` 等 | 见源码 | 与全局 `weixin_proxy_*` 同步 |
+| `DATA_DIR` | `%APPDATA%\ViralDramaBot\weixin` | 模块数据目录（`WORK_DIR` 已由 app 固定） |
 | `SUPPORTED_VIDEO_FORMATS` | mp4, mov, avi, mkv, flv, wmv | 支持的视频格式 |
 | `MAX_VIDEO_SIZE_MB` | 2048 | 最大视频大小（MB） |
 
@@ -207,13 +238,28 @@ DELETE /api/weixin/favorite-locations/{location_id}
 POST   /api/weixin/accounts
 GET    /api/weixin/accounts
 DELETE /api/weixin/accounts/{account_id}
+POST   /api/weixin/accounts/batch-delete
 POST   /api/weixin/accounts/{account_id}/login
+POST   /api/weixin/accounts/{account_id}/login-embedded
+GET    /api/weixin/login-sessions/{session_id}
+POST   /api/weixin/login-sessions/{session_id}/input
+POST   /api/weixin/login-sessions/{session_id}/cancel
 POST   /api/weixin/accounts/{account_id}/refresh
 POST   /api/weixin/accounts/{account_id}/open-post-list
 POST   /api/weixin/accounts/check-cookies
 GET    /api/weixin/accounts/refresh-status
 POST   /api/weixin/accounts/refresh-all
 ```
+
+### 流量筛选
+
+```
+POST   /api/weixin/accounts/{account_id}/traffic/scan
+GET    /api/weixin/accounts/{account_id}/traffic/scan-status
+POST   /api/weixin/accounts/{account_id}/traffic/delete
+```
+
+默认参数：`grace_period_hours=48`，`min_views=1000`。
 
 ### 上传任务
 
@@ -232,6 +278,14 @@ POST   /api/weixin/tasks/{task_id}/retry
 POST   /api/weixin/schedule
 GET    /api/weixin/schedule
 DELETE /api/weixin/schedule/{schedule_id}
+```
+
+### 运营概览（app.py）
+
+```
+GET    /api/dashboard
+GET    /api/dashboard/traffic
+POST   /api/dashboard/traffic/refresh
 ```
 
 ---
@@ -334,31 +388,34 @@ curl -X POST http://localhost:8000/api/weixin/upload/batch \
 
 ### 数据库
 
-位置：`.data/weixin/weixin.db`
+位置：`%APPDATA%\ViralDramaBot\weixin\weixin.db`
 
-- `accounts` — 账号
-- `upload_tasks` — 上传任务（含 `proxy_profile_id`、`location_label`、`proxy_ip` 等审计字段）
+- `accounts` — 账号（含 `avatar_url`、`wechat_id`）
+- `upload_tasks` — 上传任务（含 `proxy_profile_id`、`location_label`、`drama_link`、`proxy_ip` 等）
 - `proxy_profiles` — 代理线路
 - `favorite_locations` — 常用发表位置名称
 - `schedules` — 定时计划
 
-### Cookie 文件
+### Cookie 与缓存文件
 
-位置：`.data/weixin/cookies/`
+位置：`%APPDATA%\ViralDramaBot\weixin\cookies\`
 
-- `<账号名>_<时间>.json` - 账号 Cookie
+- `account_<id>.json` - 账号 Cookie
 - `profile_<hash>/` - 浏览器用户数据目录
+- `login_profiles/` - 嵌入式登录临时 profile
 - `viewer/account_<id>/` - 视频管理页浏览器数据
+
+流量快照：`%APPDATA%\ViralDramaBot\weixin\traffic_snapshot.json`
 
 ---
 
 ## 注意事项
 
 1. **浏览器要求**：需要安装 Microsoft Edge 浏览器
-2. **扫码登录**：必须在有桌面环境的机器上运行（需要弹出浏览器窗口）
+2. **扫码 / 嵌入式登录**：必须在有桌面环境的机器上运行
 3. **并发限制**：`MAX_CONCURRENT_UPLOADS` 默认 1；多批请求由 `batch_queue` 串行
-4. **风控策略**：批内成功后按 `INTER_UPLOAD_COOLDOWN_SEC` 等待（环境变量默认 45 秒，设置页可改）；模拟人类操作延迟 0.5–2 秒
-5. **代理**：页面请求走代理，视频 CDN（`*.video.qq.com`、`*.wxqcloud.qq.com*` 等）bypass，避免拖慢上传
+4. **风控策略**：批内成功后按 `INTER_UPLOAD_COOLDOWN_SEC` 等待（默认 30 秒，设置页可改）；模拟人类操作延迟 0.5–2 秒
+5. **代理**：页面请求走代理，视频 CDN（`*.video.qq.com`、`*.wxqcloud.qq.com*` 等）bypass，避免拖慢上传；代理不可用时可静默降级为不显示位置
 6. **Cookie 有效期**：后台每 3600 秒检查，过期需重新扫码
 7. **视频格式**：mp4, mov, avi, mkv, flv, wmv
 8. **视频大小**：最大 2048 MB
@@ -379,11 +436,11 @@ curl -X POST http://localhost:8000/api/weixin/upload/batch \
 - 检查视频文件是否存在
 - 检查视频格式是否支持
 - 检查视频大小是否超限
-- 查看日志文件：`.data/weixin/logs/`
+- 查看日志：`%APPDATA%\ViralDramaBot\weixin\logs\` 或 `%APPDATA%\ViralDramaBot\logs\app.log`
 
 ### Cookie 过期
 
-- 重新调用扫码登录接口
+- 重新调用扫码登录接口，或使用嵌入式登录
 - 检查网络连接
 - 确认微信账号未被封禁
 
