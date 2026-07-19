@@ -814,7 +814,7 @@ const app = createApp({
             download_timeout: 1200,
             max_retries: 3,
             weixin_upload_timeout: 600,
-            weixin_inter_upload_cooldown: 20,
+            weixin_inter_upload_cooldown: 30,
             weixin_max_retries: 3,
             weixin_proxy_enabled: true,
             weixin_proxy_scheme: 'http',
@@ -988,10 +988,10 @@ app.component('dashboard-page', {
                         <div>
                             <div class="card-title" style="margin-bottom: 4px;">近 24 小时流量</div>
                             <p class="text-muted" style="font-size: 12px; margin: 0;">
-                                平台播放量汇总；剧集排行取作品描述空白符分割后的第一段（上传时会写成「剧集链接 + 原描述」）。
-                                刷新在后台执行，可继续浏览其它页面。
+                                平台播放量汇总；剧集排行取作品描述空白符分割后的最后一段（上传时会写成「原描述 + 四空格 + 剧集链接」）。
+                                点击按钮后台刷新，可继续浏览其它页面。
                                 <span v-if="traffic?.refreshed_at">缓存时间：{{ formatTrafficTime(traffic.refreshed_at) }}</span>
-                                <span v-else>暂无缓存</span>
+                                <span v-else>暂无缓存，请手动刷新</span>
                             </p>
                         </div>
                         <button
@@ -1187,58 +1187,18 @@ app.component('dashboard-page', {
 
         const statusCount = (stats, key) => Number(stats?.[key] || 0);
 
-        const scheduleAutoTrafficAfterAccountRefresh = () => {
-            // 打开应用后仅自动刷新一次：必须等启动全量账号刷新结束后再拉流量
-            if (window.__vdbTrafficAutoRefreshed || window.__vdbTrafficAutoWaitTimer) {
-                return;
-            }
-            let sawAccountRefreshing = false;
-            let idleTicks = 0;
-            window.__vdbTrafficAutoWaitTimer = setInterval(async () => {
-                try {
-                    const res = await props.api.getWeixinAccountsRefreshStatus();
-                    if (res?.is_refreshing) {
-                        sawAccountRefreshing = true;
-                        idleTicks = 0;
-                        return;
-                    }
-                    // 已见过刷新中 → 刚结束：可以刷流量
-                    // 或长时间未见刷新启动（无账号/刷新被跳过）：超时后仍刷一次
-                    const ready = sawAccountRefreshing || idleTicks >= 40; // ~60s
-                    idleTicks += 1;
-                    if (!ready) return;
-                    clearInterval(window.__vdbTrafficAutoWaitTimer);
-                    window.__vdbTrafficAutoWaitTimer = null;
-                    if (window.__vdbTrafficAutoRefreshed) return;
-                    window.__vdbTrafficAutoRefreshed = true;
-                    refreshTraffic();
-                } catch (_) {
-                    idleTicks += 1;
-                    if (idleTicks < 40) return;
-                    clearInterval(window.__vdbTrafficAutoWaitTimer);
-                    window.__vdbTrafficAutoWaitTimer = null;
-                    if (window.__vdbTrafficAutoRefreshed) return;
-                    window.__vdbTrafficAutoRefreshed = true;
-                    refreshTraffic();
-                }
-            }, 1500);
-        };
-
         onMounted(async () => {
             await Promise.all([loadDashboard(), loadTraffic()]);
             timer = setInterval(loadDashboard, 10000);
+            // 仅展示缓存；若上次手动刷新仍在后台跑，则续上轮询
             if (traffic.value?.is_refreshing) {
                 trafficRefreshing.value = true;
                 startTrafficPoll();
-                window.__vdbTrafficAutoRefreshed = true;
-            } else {
-                scheduleAutoTrafficAfterAccountRefresh();
             }
         });
         onBeforeUnmount(() => {
             if (timer) clearInterval(timer);
             stopTrafficPoll();
-            // 不清理 __vdbTrafficAutoWaitTimer：应用级只触发一次，离开概览仍可继续等到账号刷新结束
         });
 
         return {
@@ -2181,7 +2141,7 @@ app.component('settings-page', {
             download_timeout: props.settings.download_timeout,
             max_retries: props.settings.max_retries,
             weixin_upload_timeout: props.settings.weixin_upload_timeout || 600,
-            weixin_inter_upload_cooldown: props.settings.weixin_inter_upload_cooldown || 20,
+            weixin_inter_upload_cooldown: props.settings.weixin_inter_upload_cooldown || 30,
             weixin_max_retries: props.settings.weixin_max_retries || 3,
             weixin_proxy_enabled: !!props.settings.weixin_proxy_enabled,
             weixin_proxy_scheme: props.settings.weixin_proxy_scheme || 'http',

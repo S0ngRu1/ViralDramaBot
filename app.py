@@ -335,7 +335,7 @@ class AppSettings(BaseModel):
     max_retries: int = 3
     # 视频号配置
     weixin_upload_timeout: int = 600
-    weixin_inter_upload_cooldown: int = 20
+    weixin_inter_upload_cooldown: int = 30
     weixin_max_retries: int = 3
     weixin_proxy_enabled: bool = False
     weixin_proxy_scheme: str = "http"

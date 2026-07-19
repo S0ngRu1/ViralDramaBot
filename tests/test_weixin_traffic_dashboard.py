@@ -1,4 +1,4 @@
-"""概览页流量看板：聚合与描述首段剧集提取单测"""
+"""概览页流量看板：聚合与描述末段剧集提取单测"""
 
 import unittest
 from datetime import datetime, timedelta
@@ -25,11 +25,11 @@ class TestTrafficDashboardAgg(unittest.TestCase):
 
     def test_extract_drama_link_from_description(self):
         self.assertEqual(
-            extract_drama_link_from_description("剧集甲 #ys点击上方❤【免费剧集】0元看全集"),
+            extract_drama_link_from_description("#ys点击上方❤【免费剧集】0元看全集    剧集甲"),
             "剧集甲",
         )
         self.assertEqual(
-            extract_drama_link_from_description("  剧集乙\n其余描述  "),
+            extract_drama_link_from_description("其余描述    剧集乙"),
             "剧集乙",
         )
         self.assertEqual(
@@ -42,8 +42,8 @@ class TestTrafficDashboardAgg(unittest.TestCase):
     def test_aggregate_and_build_snapshot(self):
         now = datetime(2026, 7, 19, 12, 0, 0)
         posts1 = [
-            ChannelPost("p1", "剧集甲 #ys点击上方", now - timedelta(hours=1), 80),
-            ChannelPost("p2", "剧集甲 另一条", now - timedelta(hours=2), 20),
+            ChannelPost("p1", "#ys点击上方    剧集甲", now - timedelta(hours=1), 80),
+            ChannelPost("p2", "另一条    剧集甲", now - timedelta(hours=2), 20),
         ]
         posts2 = [
             ChannelPost("p3", "剧集乙", now - timedelta(hours=3), 200),
@@ -69,7 +69,7 @@ class TestTrafficDashboardAgg(unittest.TestCase):
         drama_jia = next(d for d in snap["dramas"] if d["drama_link"] == "剧集甲")
         self.assertEqual(drama_jia["post_count"], 2)
         self.assertEqual(drama_jia["account_count"], 1)
-        # 无空白分隔时整段描述会作为首段键
+        # 无空白分隔时整段描述会作为末段键
         self.assertTrue(any(d["drama_link"] == "#ys只有描述无剧集" for d in snap["dramas"]))
 
 
