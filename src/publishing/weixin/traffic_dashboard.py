@@ -1,8 +1,8 @@
 """
-概览页近 N 小时流量快照：账号播放汇总 + 按描述首段剧集链接排行。
+概览页近 N 小时流量快照：账号播放汇总 + 按描述末段剧集链接排行。
 
-post_list 无结构化剧集字段；上传时描述为「{剧集链接} {原描述}」或仅剧集链接，
-因此取描述空白符分割后的第一段作为剧集键。
+post_list 无结构化剧集字段；上传时描述为「{原描述}    {剧集链接}」（四空格）或仅剧集链接，
+因此取描述空白符分割后的最后一段作为剧集键。
 """
 
 from __future__ import annotations
@@ -36,11 +36,14 @@ def filter_posts_in_window(
 
 
 def extract_drama_link_from_description(description: Optional[str]) -> Optional[str]:
-    """从视频描述提取剧集链接：空白符分割后的第一个非空字符串。"""
+    """从视频描述提取剧集链接：空白符分割后的最后一个非空字符串。"""
     text = (description or "").strip()
     if not text:
         return None
-    token = text.split(None, 1)[0].strip()
+    parts = text.split()
+    if not parts:
+        return None
+    token = parts[-1].strip()
     return token or None
 
 
@@ -63,7 +66,7 @@ def aggregate_drama_stats(
     posts: List[ChannelPost],
     account_id: int,
 ) -> Dict[str, dict]:
-    """按描述首段剧集链接聚合（单账号），后续再跨账号合并。"""
+    """按描述末段剧集链接聚合（单账号），后续再跨账号合并。"""
     result: Dict[str, dict] = {}
     for post in posts:
         drama = extract_drama_link_from_description(post.title)
@@ -137,7 +140,7 @@ def build_snapshot_from_account_results(
 
 
 class TrafficDashboardService:
-    """拉取平台播放量，并从作品描述首段提取剧集链接生成概览快照。"""
+    """拉取平台播放量，并从作品描述末段提取剧集链接生成概览快照。"""
 
     def __init__(
         self,

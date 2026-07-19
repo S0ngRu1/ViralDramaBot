@@ -23,7 +23,7 @@ class Config:
 
     # 视频号默认配置
     DEFAULT_WEIXIN_UPLOAD_TIMEOUT = 600
-    DEFAULT_WEIXIN_INTER_UPLOAD_COOLDOWN = 20
+    DEFAULT_WEIXIN_INTER_UPLOAD_COOLDOWN = 30
     DEFAULT_WEIXIN_MAX_RETRIES = 3
     # 默认开启代理：发表视频时为账号安全考虑，默认强制走代理；
     # 若代理不可用，uploader 会静默降级为「不显示位置」模式继续发表，不阻塞业务。

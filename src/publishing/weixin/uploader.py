@@ -51,7 +51,7 @@ class Uploader:
         上传单个视频。
 
         当前发表流程会填写「视频描述」+「剧集链接」+「不显示位置」。
-        若填写了剧集链接，描述框内容为「剧集链接 + 空格 + 原描述」，同时仍挂载剧集链接。
+        若填写了剧集链接，描述框内容为「原描述 + 四个空格 + 剧集链接」，同时仍挂载剧集链接。
         标签功能已下线，所有标签写入逻辑均不再执行（保留过期的 `tags` 字段会被忽略）。
 
         位置默认强制为「不显示位置」（位置列表第一项），避免 IP 定位被自动写入。
@@ -373,7 +373,7 @@ class Uploader:
         """填写描述 + 剧集链接 + （可选）短标题。
 
         描述框拼接规则：
-        - 有剧集链接 + 有描述 → `{剧集链接} {原描述}`
+        - 有剧集链接 + 有描述 → `{原描述}    {剧集链接}`（中间四个空格）
         - 只有剧集链接 → 描述框只写剧集链接
         - 只有描述 → 行为与原来一致（只写原描述）
 
@@ -387,7 +387,7 @@ class Uploader:
         drama = (drama_link or "").strip()
         description = (metadata.description or "").strip()
         if drama and description:
-            description = f"{drama} {description}"
+            description = f"{description}    {drama}"
         elif drama:
             description = drama
 
